@@ -41,7 +41,10 @@ namespace Tsavorite.core
         {
             base.Reset();
             for (int index = 0; index < BufferSize; index++)
-                ReturnPage(index);
+            {
+                if (IsAllocated(index))
+                    FreePage(index);
+            }
 
             Initialize();
         }
@@ -117,11 +120,11 @@ namespace Tsavorite.core
             return (size, RoundUp(size, kRecordAlignment));
         }
 
-        public override (int actualSize, int allocatedSize, int keySize) GetRMWCopyDestinationRecordSize<Input, TsavoriteSession>(ref SpanByte key, ref Input input, ref SpanByte value, ref RecordInfo recordInfo, TsavoriteSession tsavoriteSession)
+        public override (int actualSize, int allocatedSize, int keySize) GetRMWCopyDestinationRecordSize<Input, TVariableLengthInput>(ref SpanByte key, ref Input input, ref SpanByte value, ref RecordInfo recordInfo, TVariableLengthInput varlenInput)
         {
             // Used by RMW to determine the length of copy destination (taking Input into account), so does not need to get filler length.
             var keySize = key.TotalSize;
-            var size = RecordInfo.GetLength() + RoundUp(keySize, kRecordAlignment) + tsavoriteSession.GetRMWModifiedValueLength(ref value, ref input);
+            var size = RecordInfo.GetLength() + RoundUp(keySize, kRecordAlignment) + varlenInput.GetRMWModifiedValueLength(ref value, ref input);
             return (size, RoundUp(size, kRecordAlignment), keySize);
         }
 
@@ -160,10 +163,10 @@ namespace Tsavorite.core
 
         public override int GetFixedRecordSize() => GetAverageRecordSize();
 
-        public override (int actualSize, int allocatedSize, int keySize) GetRMWInitialRecordSize<TInput, TsavoriteSession>(ref SpanByte key, ref TInput input, TsavoriteSession tsavoriteSession)
+        public override (int actualSize, int allocatedSize, int keySize) GetRMWInitialRecordSize<TInput, TSessionFunctionsWrapper>(ref SpanByte key, ref TInput input, TSessionFunctionsWrapper sessionFunctions)
         {
             int keySize = key.TotalSize;
-            var actualSize = RecordInfo.GetLength() + RoundUp(keySize, kRecordAlignment) + tsavoriteSession.GetRMWInitialValueLength(ref input);
+            var actualSize = RecordInfo.GetLength() + RoundUp(keySize, kRecordAlignment) + sessionFunctions.GetRMWInitialValueLength(ref input);
             return (actualSize, RoundUp(actualSize, kRecordAlignment), keySize);
         }
 
@@ -205,7 +208,7 @@ namespace Tsavorite.core
         /// <param name="index"></param>
         internal override void AllocatePage(int index)
         {
-            Interlocked.Increment(ref AllocatedPageCount);
+            IncrementAllocatedPageCount();
 
             if (overflowPagePool.TryGet(out var item))
             {
@@ -218,7 +221,6 @@ namespace Tsavorite.core
 
             byte[] tmp = GC.AllocateArray<byte>(adjustedSize, true);
             long p = (long)Unsafe.AsPointer(ref tmp[0]);
-            Array.Clear(tmp, 0, adjustedSize);
             pointers[index] = (p + (sectorSize - 1)) & ~((long)sectorSize - 1);
             values[index] = tmp;
         }
@@ -348,15 +350,15 @@ namespace Tsavorite.core
         /// <summary>
         /// Iterator interface for pull-scanning Tsavorite log
         /// </summary>
-        public override ITsavoriteScanIterator<SpanByte, SpanByte> Scan(TsavoriteKV<SpanByte, SpanByte> store, long beginAddress, long endAddress, ScanBufferingMode scanBufferingMode)
-            => new SpanByteScanIterator(store, this, beginAddress, endAddress, scanBufferingMode, epoch, logger: logger);
+        public override ITsavoriteScanIterator<SpanByte, SpanByte> Scan(TsavoriteKV<SpanByte, SpanByte> store, long beginAddress, long endAddress, ScanBufferingMode scanBufferingMode, bool includeSealedRecords)
+            => new SpanByteScanIterator(store, this, beginAddress, endAddress, scanBufferingMode, includeSealedRecords, epoch, logger: logger);
 
         /// <summary>
         /// Implementation for push-scanning Tsavorite log, called from LogAccessor
         /// </summary>
         internal override bool Scan<TScanFunctions>(TsavoriteKV<SpanByte, SpanByte> store, long beginAddress, long endAddress, ref TScanFunctions scanFunctions, ScanBufferingMode scanBufferingMode)
         {
-            using SpanByteScanIterator iter = new(store, this, beginAddress, endAddress, scanBufferingMode, epoch, logger: logger);
+            using SpanByteScanIterator iter = new(store, this, beginAddress, endAddress, scanBufferingMode, false, epoch, logger: logger);
             return PushScanImpl(beginAddress, endAddress, ref scanFunctions, iter);
         }
 
@@ -365,7 +367,7 @@ namespace Tsavorite.core
         /// </summary>
         internal override bool ScanCursor<TScanFunctions>(TsavoriteKV<SpanByte, SpanByte> store, ScanCursorState<SpanByte, SpanByte> scanCursorState, ref long cursor, long count, TScanFunctions scanFunctions, long endAddress, bool validateCursor)
         {
-            using SpanByteScanIterator iter = new(store, this, cursor, endAddress, ScanBufferingMode.SinglePageBuffering, epoch, logger: logger);
+            using SpanByteScanIterator iter = new(store, this, cursor, endAddress, ScanBufferingMode.SinglePageBuffering, false, epoch, logger: logger);
             return ScanLookup<SpanByte, SpanByteAndMemory, TScanFunctions, SpanByteScanIterator>(store, scanCursorState, ref cursor, count, scanFunctions, iter, validateCursor);
         }
 
@@ -381,7 +383,7 @@ namespace Tsavorite.core
         /// <inheritdoc />
         internal override void MemoryPageScan(long beginAddress, long endAddress, IObserver<ITsavoriteScanIterator<SpanByte, SpanByte>> observer)
         {
-            using var iter = new SpanByteScanIterator(store: null, this, beginAddress, endAddress, ScanBufferingMode.NoBuffering, epoch, true, logger: logger);
+            using var iter = new SpanByteScanIterator(store: null, this, beginAddress, endAddress, ScanBufferingMode.NoBuffering, false, epoch, true, logger: logger);
             observer?.OnNext(iter);
         }
 
@@ -411,8 +413,6 @@ namespace Tsavorite.core
                                         IDevice device = null, IDevice objectLogDevice = null)
         {
             var usedDevice = device;
-            IDevice usedObjlogDevice = objectLogDevice;
-
             if (device == null)
             {
                 usedDevice = this.device;

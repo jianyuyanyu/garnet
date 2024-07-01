@@ -24,6 +24,7 @@ namespace Garnet.client
         readonly string address;
         readonly int port;
         readonly int bufferSize;
+        readonly int bufferSizeDigits;
         INetworkSender networkSender;
         readonly ElasticCircularBuffer<TaskType> tasksTypes = new();
         readonly ElasticCircularBuffer<TaskCompletionSource<string>> tcsQueue = new();
@@ -89,6 +90,7 @@ namespace Garnet.client
             this.address = address;
             this.port = port;
             this.bufferSize = bufferSize;
+            this.bufferSizeDigits = NumUtils.NumDigits(bufferSize);
             this.logger = logger;
             this.sslOptions = tlsOptions;
             this.networkSendThrottleMax = networkSendThrottleMax;
@@ -106,7 +108,7 @@ namespace Garnet.client
         {
             socket = GetSendSocket(address, port, timeoutMs);
             networkHandler = new GarnetClientSessionTcpNetworkHandler(this, socket, networkPool, sslOptions != null, this, networkSendThrottleMax, logger);
-            networkHandler.StartAsync(sslOptions, $"{address}:{port}", token).GetAwaiter().GetResult();
+            networkHandler.StartAsync(sslOptions, $"{address}:{port}", token).ConfigureAwait(false).GetAwaiter().GetResult();
             networkSender = networkHandler.GetNetworkSender();
             networkSender.GetResponseObject();
             offset = networkSender.GetResponseObjectHead();
@@ -117,11 +119,11 @@ namespace Garnet.client
             {
                 if (authUsername != null)
                 {
-                    ExecuteAsync("AUTH", authUsername, authPassword == null ? "" : authPassword).GetAwaiter().GetResult();
+                    ExecuteAsync("AUTH", authUsername, authPassword == null ? "" : authPassword).ConfigureAwait(false).GetAwaiter().GetResult();
                 }
                 else if (authPassword != null)
                 {
-                    ExecuteAsync("AUTH", authPassword).GetAwaiter().GetResult();
+                    ExecuteAsync("AUTH", authPassword).ConfigureAwait(false).GetAwaiter().GetResult();
                 }
             }
             catch (Exception e)
@@ -196,7 +198,7 @@ namespace Garnet.client
         }
 
         static ReadOnlySpan<byte> CLUSTER => "$7\r\nCLUSTER\r\n"u8;
-        static ReadOnlySpan<byte> appendLog => "appendlog"u8;
+        static ReadOnlySpan<byte> appendLog => "APPENDLOG"u8;
 
         /// <summary>
         /// ClusterAppendLog
@@ -229,7 +231,7 @@ namespace Garnet.client
             }
             offset = curr;
 
-            while (!RespWriteUtils.WriteBulkString(nodeId, ref curr, end))
+            while (!RespWriteUtils.WriteAsciiBulkString(nodeId, ref curr, end))
             {
                 Flush();
                 curr = offset;
@@ -311,7 +313,7 @@ namespace Garnet.client
 
             foreach (var cmd in command)
             {
-                while (!RespWriteUtils.WriteBulkString(cmd, ref curr, end))
+                while (!RespWriteUtils.WriteAsciiBulkString(cmd, ref curr, end))
                 {
                     Flush();
                     curr = offset;
@@ -325,7 +327,7 @@ namespace Garnet.client
 
         private int ProcessReplies(byte* recvBufferPtr, int bytesRead)
         {
-            // Debug.WriteLine("RECV: [" + Encoding.UTF8.GetString(new Span<byte>(recvBufferPtr, bytesRead).ToArray()).Replace("\n", "|").Replace("\r", "") + "]");
+            // Debug.WriteLine("RECV: [" + Encoding.UTF8.GetString(new Span<byte>(recvBufferPtr, bytesRead)).Replace("\n", "|").Replace("\r", "") + "]");
 
             string result = null;
             string[] resultArray = null;
@@ -340,33 +342,33 @@ namespace Garnet.client
                 switch (*ptr)
                 {
                     case (byte)'+':
-                        if (!RespReadUtils.ReadSimpleString(out result, ref ptr, recvBufferPtr + bytesRead))
+                        if (!RespReadResponseUtils.ReadSimpleString(out result, ref ptr, recvBufferPtr + bytesRead))
                             success = false;
                         break;
                     case (byte)':':
-                        if (!RespReadUtils.ReadIntegerAsString(out result, ref ptr, recvBufferPtr + bytesRead))
+                        if (!RespReadResponseUtils.ReadIntegerAsString(out result, ref ptr, recvBufferPtr + bytesRead))
                             success = false;
                         break;
 
                     case (byte)'-':
                         error = true;
-                        if (!RespReadUtils.ReadErrorAsString(out result, ref ptr, recvBufferPtr + bytesRead))
+                        if (!RespReadResponseUtils.ReadErrorAsString(out result, ref ptr, recvBufferPtr + bytesRead))
                             success = false;
                         break;
 
                     case (byte)'$':
-                        if (!RespReadUtils.ReadStringWithLengthHeader(out result, ref ptr, recvBufferPtr + bytesRead))
+                        if (!RespReadResponseUtils.ReadStringWithLengthHeader(out result, ref ptr, recvBufferPtr + bytesRead))
                             success = false;
                         break;
 
                     case (byte)'*':
                         isArray = true;
-                        if (!RespReadUtils.ReadStringArrayWithLengthHeader(out resultArray, ref ptr, recvBufferPtr + bytesRead))
+                        if (!RespReadResponseUtils.ReadStringArrayWithLengthHeader(out resultArray, ref ptr, recvBufferPtr + bytesRead))
                             success = false;
                         break;
 
                     default:
-                        throw new Exception("Unexpected response: " + Encoding.UTF8.GetString(new Span<byte>(recvBufferPtr, bytesRead).ToArray()).Replace("\n", "|").Replace("\r", "") + "]");
+                        throw new Exception("Unexpected response: " + Encoding.UTF8.GetString(new Span<byte>(recvBufferPtr, bytesRead)).Replace("\n", "|").Replace("\r", "") + "]");
                 }
 
                 if (!success) return readHead;
@@ -413,7 +415,7 @@ namespace Garnet.client
             }
         }
 
-        private Socket GetSendSocket(string address, int port, int millisecondsTimeout)
+        private static Socket GetSendSocket(string address, int port, int millisecondsTimeout)
         {
             var ip = IPAddress.Parse(address);
             var endPoint = new IPEndPoint(ip, port);

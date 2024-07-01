@@ -54,11 +54,10 @@ namespace Tsavorite.core
         /// <param name="preallocateFile"></param>
         /// <param name="deleteOnClose"></param>
         /// <param name="disableFileBuffering">Whether file buffering (during write) is disabled (default of true requires aligned writes)</param>
-        /// <param name="capacity">The maximum number of bytes this storage device can accommondate, or CAPACITY_UNSPECIFIED if there is no such limit </param>
+        /// <param name="capacity">The maximum number of bytes this storage device can accommodate, or CAPACITY_UNSPECIFIED if there is no such limit </param>
         /// <param name="recoverDevice">Whether to recover device metadata from existing files</param>
         /// <param name="useIoCompletionPort">Whether we use IO completion port with polling</param>
         public LocalStorageDevice(string filename,
-
                                   bool preallocateFile = false,
                                   bool deleteOnClose = false,
                                   bool disableFileBuffering = true,
@@ -86,7 +85,7 @@ namespace Tsavorite.core
         /// <param name="preallocateFile"></param>
         /// <param name="deleteOnClose"></param>
         /// <param name="disableFileBuffering"></param>
-        /// <param name="capacity">The maximum number of bytes this storage device can accommondate, or CAPACITY_UNSPECIFIED if there is no such limit </param>
+        /// <param name="capacity">The maximum number of bytes this storage device can accommodate, or CAPACITY_UNSPECIFIED if there is no such limit </param>
         /// <param name="recoverDevice">Whether to recover device metadata from existing files</param>
         /// <param name="initialLogFileHandles">Optional set of preloaded safe file handles, which can speed up hydration of preexisting log file handles</param>
         /// <param name="useIoCompletionPort">Whether we use IO completion port with polling</param>
@@ -118,7 +117,7 @@ namespace Tsavorite.core
                 ioCompletionPort = Native32.CreateIoCompletionPort(new SafeFileHandle(new IntPtr(-1), false), IntPtr.Zero, UIntPtr.Zero, (uint)(workerThreads + NumCompletionThreads));
                 for (int i = 0; i < NumCompletionThreads; i++)
                 {
-                    var thread = new Thread(() => new LocalStorageDeviceCompletionWorker().Start(ioCompletionPort, _callback))
+                    var thread = new Thread(() => LocalStorageDeviceCompletionWorker.Start(ioCompletionPort, _callback))
                     {
                         IsBackground = true
                     };
@@ -230,7 +229,7 @@ namespace Tsavorite.core
                 bool _result = Native32.ReadFile(logHandle,
                                                 destinationAddress,
                                                 readLength,
-                                                out uint bytesRead,
+                                                out _,
                                                 ovNative);
 
                 if (!_result)
@@ -297,7 +296,7 @@ namespace Tsavorite.core
                 bool _result = Native32.WriteFile(logHandle,
                                         sourceAddress,
                                         numBytesToWrite,
-                                        out uint bytesWritten,
+                                        out _,
                                         ovNative);
 
                 if (!_result)
@@ -369,7 +368,7 @@ namespace Tsavorite.core
         {
             if (!useIoCompletionPort) return true;
 
-            bool succeeded = Native32.GetQueuedCompletionStatus(ioCompletionPort, out uint num_bytes, out IntPtr completionKey, out NativeOverlapped* nativeOverlapped, 0);
+            bool succeeded = Native32.GetQueuedCompletionStatus(ioCompletionPort, out uint num_bytes, out _, out NativeOverlapped* nativeOverlapped, 0);
 
             if (nativeOverlapped != null)
             {
@@ -553,12 +552,12 @@ namespace Tsavorite.core
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
     sealed unsafe class LocalStorageDeviceCompletionWorker
     {
-        public void Start(IntPtr ioCompletionPort, IOCompletionCallback _callback)
+        public static void Start(IntPtr ioCompletionPort, IOCompletionCallback _callback)
         {
             while (true)
             {
                 Thread.Yield();
-                bool succeeded = Native32.GetQueuedCompletionStatus(ioCompletionPort, out uint num_bytes, out IntPtr completionKey, out NativeOverlapped* nativeOverlapped, uint.MaxValue);
+                bool succeeded = Native32.GetQueuedCompletionStatus(ioCompletionPort, out uint num_bytes, out _, out NativeOverlapped* nativeOverlapped, uint.MaxValue);
 
                 if (nativeOverlapped != null)
                 {

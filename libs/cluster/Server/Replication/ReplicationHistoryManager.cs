@@ -11,7 +11,7 @@ using Tsavorite.core;
 
 namespace Garnet.cluster
 {
-    internal class ReplicationHistory
+    internal sealed class ReplicationHistory
     {
         public string primary_replid;
         public string primary_replid2;
@@ -146,6 +146,7 @@ namespace Garnet.cluster
                     break;
             }
             FlushConfig();
+            SetPrimaryReplicationId();
         }
 
         private void FlushConfig()

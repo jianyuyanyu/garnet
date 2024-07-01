@@ -4,7 +4,6 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
-using System.Text;
 using Garnet.common;
 using Tsavorite.core;
 
@@ -58,16 +57,13 @@ namespace Garnet.server
             byte* input_startptr = input + ObjectInputHeader.Size + sizeof(int);
             byte* input_currptr = input_startptr;
 
-            int leftTokens = _input->count;
+            int leftTokens = _input->arg1;
 
             // Largest number of items to print 
             int limitCountInOutput = *(int*)(input + ObjectInputHeader.Size);
 
-            int parameterLength = 0;
-            byte* parameterWord = null;
-
             // Cursor
-            cursorInput = _input->done;
+            cursorInput = _input->arg2;
 
             patternLength = 0;
             pattern = default;
@@ -78,15 +74,13 @@ namespace Garnet.server
             ObjectOutputHeader _output = default;
 
             // This value is used to indicate partial command execution
-            _output.countDone = Int32.MinValue;
+            _output.result1 = int.MinValue;
             bytesDone = 0;
 
             while (leftTokens > 0)
             {
-                if (!RespReadUtils.ReadPtrWithLengthHeader(ref parameterWord, ref parameterLength, ref input_currptr, input + length))
+                if (!RespReadUtils.TrySliceWithLengthHeader(out var parameterSB, ref input_currptr, input + length))
                     return false;
-
-                var parameterSB = new ReadOnlySpan<byte>(parameterWord, parameterLength);
 
                 if (parameterSB.SequenceEqual(CmdStrings.MATCH) || parameterSB.SequenceEqual(CmdStrings.match))
                 {
@@ -97,10 +91,10 @@ namespace Garnet.server
                 }
                 else if (parameterSB.SequenceEqual(CmdStrings.COUNT) || parameterSB.SequenceEqual(CmdStrings.count))
                 {
-                    if (!RespReadUtils.ReadByteArrayWithLengthHeader(out var countParameterValue, ref input_currptr, input + length))
+                    if (!RespReadUtils.ReadIntWithLengthHeader(out countInInput, ref input_currptr, input + length))
+                    {
                         return false;
-
-                    int.TryParse(Encoding.ASCII.GetString(countParameterValue), out countInInput);
+                    }
 
                     // Limiting number of items to send to the output
                     if (countInInput > limitCountInOutput)
@@ -163,11 +157,7 @@ namespace Garnet.server
                                 ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
                     }
                 }
-
-                // Write bytes parsed from input and count done, into output footer
-                _output.bytesDone = bytesDone;
-                _output.countDone = items.Count;
-                _output.opsDone = items.Count;
+                _output.result1 = items.Count;
             }
             finally
             {

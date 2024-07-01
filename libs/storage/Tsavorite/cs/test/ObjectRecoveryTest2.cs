@@ -13,19 +13,17 @@ namespace Tsavorite.test.recovery.objects
     public class ObjectRecoveryTests2
     {
         int iterations;
-        string TsavoriteFolderPath { get; set; }
 
         [SetUp]
         public void Setup()
         {
-            TsavoriteFolderPath = TestUtils.MethodTestDir;
-            TestUtils.RecreateDirectory(TsavoriteFolderPath);
+            TestUtils.RecreateDirectory(TestUtils.MethodTestDir);
         }
 
         [TearDown]
         public void TearDown()
         {
-            TestUtils.DeleteDirectory(TsavoriteFolderPath);
+            TestUtils.DeleteDirectory(TestUtils.MethodTestDir);
         }
 
         [Test]
@@ -39,7 +37,7 @@ namespace Tsavorite.test.recovery.objects
             [Values] bool isAsync)
         {
             this.iterations = iterations;
-            Prepare(out _, out _, out IDevice log, out IDevice objlog, out TsavoriteKV<MyKey, MyValue> h, out MyContext context);
+            Prepare(out IDevice log, out IDevice objlog, out TsavoriteKV<MyKey, MyValue> h, out MyContext context);
 
             var session1 = h.NewSession<MyInput, MyOutput, MyContext, MyFunctions>(new MyFunctions());
             Write(session1, context, h, checkpointType);
@@ -51,7 +49,7 @@ namespace Tsavorite.test.recovery.objects
 
             Destroy(log, objlog, h);
 
-            Prepare(out _, out _, out log, out objlog, out h, out context);
+            Prepare(out log, out objlog, out h, out context);
 
             if (isAsync)
                 await h.RecoverAsync();
@@ -65,12 +63,10 @@ namespace Tsavorite.test.recovery.objects
             Destroy(log, objlog, h);
         }
 
-        private void Prepare(out string logPath, out string objPath, out IDevice log, out IDevice objlog, out TsavoriteKV<MyKey, MyValue> h, out MyContext context)
+        private void Prepare(out IDevice log, out IDevice objlog, out TsavoriteKV<MyKey, MyValue> h, out MyContext context)
         {
-            logPath = Path.Combine(TsavoriteFolderPath, $"RecoverTests.log");
-            objPath = Path.Combine(TsavoriteFolderPath, $"RecoverTests_HEAP.log");
-            log = Devices.CreateLogDevice(logPath);
-            objlog = Devices.CreateLogDevice(objPath);
+            log = Devices.CreateLogDevice(Path.Combine(TestUtils.MethodTestDir, "RecoverTests.log"));
+            objlog = Devices.CreateLogDevice(Path.Combine(TestUtils.MethodTestDir, "RecoverTests_HEAP.log"));
             h = new TsavoriteKV<MyKey, MyValue>
                 (1L << 20,
                 new LogSettings
@@ -83,7 +79,7 @@ namespace Tsavorite.test.recovery.objects
                 },
                 new CheckpointSettings()
                 {
-                    CheckpointDir = Path.Combine(TsavoriteFolderPath, "check-points")
+                    CheckpointDir = Path.Combine(TestUtils.MethodTestDir, "check-points")
                 },
                 new SerializerSettings<MyKey, MyValue> { keySerializer = () => new MyKeySerializer(), valueSerializer = () => new MyValueSerializer() }
              );
@@ -100,11 +96,13 @@ namespace Tsavorite.test.recovery.objects
 
         private void Write(ClientSession<MyKey, MyValue, MyInput, MyOutput, MyContext, MyFunctions> session, MyContext context, TsavoriteKV<MyKey, MyValue> store, CheckpointType checkpointType)
         {
+            var bContext = session.BasicContext;
+
             for (int i = 0; i < iterations; i++)
             {
                 var _key = new MyKey { key = i, name = i.ToString() };
                 var value = new MyValue { value = i.ToString() };
-                session.Upsert(ref _key, ref value, context, 0);
+                bContext.Upsert(ref _key, ref value, context);
 
                 if (i % 100 == 0)
                 {
@@ -116,16 +114,18 @@ namespace Tsavorite.test.recovery.objects
 
         private void Read(ClientSession<MyKey, MyValue, MyInput, MyOutput, MyContext, MyFunctions> session, MyContext context, bool delete)
         {
+            var bContext = session.BasicContext;
+
             for (int i = 0; i < iterations; i++)
             {
                 MyKey key = new() { key = i, name = i.ToString() };
                 MyInput input = default;
                 MyOutput g1 = new();
-                var status = session.Read(ref key, ref input, ref g1, context, 0);
+                var status = bContext.Read(ref key, ref input, ref g1, context);
 
                 if (status.IsPending)
                 {
-                    session.CompletePending(true);
+                    bContext.CompletePending(true);
                     context.FinalizeRead(ref status, ref g1);
                 }
 
@@ -138,12 +138,12 @@ namespace Tsavorite.test.recovery.objects
                 MyKey key = new() { key = 1, name = "1" };
                 MyInput input = default;
                 MyOutput output = new();
-                session.Delete(ref key, context, 0);
-                var status = session.Read(ref key, ref input, ref output, context, 0);
+                bContext.Delete(ref key, context);
+                var status = bContext.Read(ref key, ref input, ref output, context);
 
                 if (status.IsPending)
                 {
-                    session.CompletePending(true);
+                    bContext.CompletePending(true);
                     context.FinalizeRead(ref status, ref output);
                 }
 
@@ -225,7 +225,7 @@ namespace Tsavorite.test.recovery.objects
     }
 
 
-    public class MyFunctions : FunctionsBase<MyKey, MyValue, MyInput, MyOutput, MyContext>
+    public class MyFunctions : SessionFunctionsBase<MyKey, MyValue, MyInput, MyOutput, MyContext>
     {
         public override bool InitialUpdater(ref MyKey key, ref MyInput input, ref MyValue value, ref MyOutput output, ref RMWInfo rmwInfo, ref RecordInfo recordInfo) { value.value = input.value; return true; }
         public override bool NeedCopyUpdate(ref MyKey key, ref MyInput input, ref MyValue oldValue, ref MyOutput output, ref RMWInfo rmwInfo) => true;

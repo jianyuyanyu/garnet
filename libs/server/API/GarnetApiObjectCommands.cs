@@ -11,8 +11,8 @@ namespace Garnet.server
     /// Garnet API implementation
     /// </summary>
     public partial struct GarnetApi<TContext, TObjectContext> : IGarnetApi, IGarnetWatchApi
-        where TContext : ITsavoriteContext<SpanByte, SpanByte, SpanByte, SpanByteAndMemory, long>
-        where TObjectContext : ITsavoriteContext<byte[], IGarnetObject, SpanByte, GarnetObjectStoreOutput, long>
+        where TContext : ITsavoriteContext<SpanByte, SpanByte, SpanByte, SpanByteAndMemory, long, MainStoreFunctions>
+        where TObjectContext : ITsavoriteContext<byte[], IGarnetObject, SpanByte, GarnetObjectStoreOutput, long, ObjectStoreFunctions>
     {
         #region SortedSet Methods
 
@@ -20,7 +20,7 @@ namespace Garnet.server
         public GarnetStatus SortedSetAdd(byte[] key, ArgSlice input, out int zaddCount)
         {
             var status = storageSession.SortedSetAdd(key, input, out var output, ref objectContext);
-            zaddCount = output.countDone;
+            zaddCount = output.result1;
             return status;
         }
 
@@ -38,11 +38,11 @@ namespace Garnet.server
 
         /// <inheritdoc />
         public GarnetStatus SortedSetRemove(ArgSlice key, ArgSlice member, out int zremCount)
-            => storageSession.SortedSetRemove(key.Bytes, member, out zremCount, ref objectContext);
+            => storageSession.SortedSetRemove(key.ToArray(), member, out zremCount, ref objectContext);
 
         /// <inheritdoc />
         public GarnetStatus SortedSetRemove(ArgSlice key, ArgSlice[] members, out int zaddCount)
-            => storageSession.SortedSetRemove(key.Bytes, members, out zaddCount, ref objectContext);
+            => storageSession.SortedSetRemove(key.ToArray(), members, out zaddCount, ref objectContext);
 
         /// <inheritdoc />
         public GarnetStatus SortedSetRemove(byte[] key, ArgSlice input, out ObjectOutputHeader output)
@@ -63,6 +63,10 @@ namespace Garnet.server
         /// <inheritdoc />
         public GarnetStatus SortedSetScore(byte[] key, ArgSlice input, ref GarnetObjectStoreOutput outputFooter)
             => storageSession.SortedSetScore(key, input, ref outputFooter, ref objectContext);
+
+        /// <inheritdoc />
+        public GarnetStatus SortedSetScores(byte[] key, ArgSlice input, ref GarnetObjectStoreOutput outputFooter)
+            => storageSession.SortedSetScores(key, input, ref outputFooter, ref objectContext);
 
         /// <inheritdoc />
         public GarnetStatus SortedSetPop(byte[] key, ArgSlice input, ref GarnetObjectStoreOutput outputFooter)
@@ -109,8 +113,12 @@ namespace Garnet.server
             => storageSession.SortedSetRemoveRange(key, input, out output, ref objectContext);
 
         /// <inheritdoc />
-        public GarnetStatus SortedSetRank(byte[] key, ArgSlice input, out ObjectOutputHeader output)
-            => storageSession.SortedSetRank(key, input, out output, ref objectContext);
+        public GarnetStatus SortedSetRank(byte[] key, ArgSlice input, ref GarnetObjectStoreOutput outputFooter)
+            => storageSession.SortedSetRank(key, input, ref outputFooter, ref objectContext);
+
+        /// <inheritdoc />
+        public GarnetStatus SortedSetRank(ArgSlice key, ArgSlice member, bool reverse, out long? rank)
+            => storageSession.SortedSetRank(key, member, reverse, out rank, ref objectContext);
 
         /// <inheritdoc />
         public GarnetStatus SortedSetRandomMember(byte[] key, ArgSlice input, ref GarnetObjectStoreOutput outputFooter)
@@ -205,7 +213,7 @@ namespace Garnet.server
             => storageSession.ListLength(key, input, out output, ref objectContext);
 
         /// <inheritdoc />
-        public bool ListMove(ArgSlice source, ArgSlice destination, OperationDirection sourceDirection, OperationDirection destinationDirection, out byte[] element)
+        public GarnetStatus ListMove(ArgSlice source, ArgSlice destination, OperationDirection sourceDirection, OperationDirection destinationDirection, out byte[] element)
             => storageSession.ListMove(source, destination, sourceDirection, destinationDirection, out element);
 
         /// <inheritdoc />
@@ -231,6 +239,10 @@ namespace Garnet.server
         /// <inheritdoc />
         public GarnetStatus ListRemove(byte[] key, ArgSlice input, out ObjectOutputHeader output)
             => storageSession.ListRemove(key, input, out output, ref objectContext);
+
+        /// <inheritdoc />
+        public GarnetStatus ListSet(byte[] key, ArgSlice input, ref GarnetObjectStoreOutput outputFooter)
+            => storageSession.ListSet(key, input, ref outputFooter, ref objectContext);
 
         #endregion
 
@@ -277,6 +289,10 @@ namespace Garnet.server
             => storageSession.SetMembers(key, input, ref outputFooter, ref objectContext);
 
         /// <inheritdoc />
+        public GarnetStatus SetIsMember(byte[] key, ArgSlice input, ref GarnetObjectStoreOutput outputFooter)
+            => storageSession.SetIsMember(key, input, ref outputFooter, ref objectContext);
+
+        /// <inheritdoc />
         public GarnetStatus SetPop(ArgSlice key, out ArgSlice member)
             => storageSession.SetPop(key, out member, ref objectContext);
 
@@ -289,8 +305,39 @@ namespace Garnet.server
             => storageSession.SetPop(key, input, ref outputFooter, ref objectContext);
 
         /// <inheritdoc />
+        public GarnetStatus SetRandomMember(byte[] key, ArgSlice input, ref GarnetObjectStoreOutput outputFooter)
+            => storageSession.SetRandomMember(key, input, ref outputFooter, ref objectContext);
+
+        /// <inheritdoc />
         public GarnetStatus SetScan(ArgSlice key, long cursor, string match, int count, out ArgSlice[] items)
             => storageSession.SetScan(key, cursor, match, count, out items, ref objectContext);
+
+        /// <inheritdoc />
+        public GarnetStatus SetMove(ArgSlice sourceKey, ArgSlice destinationKey, ArgSlice member, out int smoveResult)
+            => storageSession.SetMove(sourceKey, destinationKey, member, out smoveResult);
+
+        public GarnetStatus SetUnion(ArgSlice[] keys, out HashSet<byte[]> output)
+            => storageSession.SetUnion(keys, out output);
+
+        /// <inheritdoc />
+        public GarnetStatus SetUnionStore(byte[] key, ArgSlice[] keys, out int count)
+            => storageSession.SetUnionStore(key, keys, out count);
+
+        /// <inheritdoc />
+        public GarnetStatus SetDiff(ArgSlice[] keys, out HashSet<byte[]> members)
+            => storageSession.SetDiff(keys, out members);
+
+        /// <inheritdoc />
+        public GarnetStatus SetDiffStore(byte[] key, ArgSlice[] keys, out int count)
+            => storageSession.SetDiffStore(key, keys, out count);
+
+        /// <inheritdoc />
+        public GarnetStatus SetIntersect(ArgSlice[] keys, out HashSet<byte[]> output)
+            => storageSession.SetIntersect(keys, out output);
+
+        /// <inheritdoc />
+        public GarnetStatus SetIntersectStore(byte[] key, ArgSlice[] keys, out int count)
+            => storageSession.SetIntersectStore(key, keys, out count);
 
         #endregion
 
@@ -325,10 +372,6 @@ namespace Garnet.server
          => storageSession.HashGet(key, field, out value, ref objectContext);
 
         /// <inheritdoc />
-        public GarnetStatus HashGet(ArgSlice key, ArgSlice[] fields, out ArgSlice[] values)
-        => storageSession.HashGet(key, fields, out values, ref objectContext);
-
-        /// <inheritdoc />
         public GarnetStatus HashGetAll(ArgSlice key, out ArgSlice[] values)
         => storageSession.HashGetAll(key, out values, ref objectContext);
 
@@ -337,12 +380,28 @@ namespace Garnet.server
         => storageSession.HashGet(key, input, ref outputFooter, ref objectContext);
 
         /// <inheritdoc />
+        public GarnetStatus HashGetAll(byte[] key, ArgSlice input, ref GarnetObjectStoreOutput outputFooter)
+            => storageSession.HashGetAll(key, input, ref outputFooter, ref objectContext);
+
+        /// <inheritdoc />
+        public GarnetStatus HashGetMultiple(byte[] key, ArgSlice input, ref GarnetObjectStoreOutput outputFooter)
+            => storageSession.HashGetMultiple(key, input, ref outputFooter, ref objectContext);
+
+        /// <inheritdoc />
+        public GarnetStatus HashGetMultiple(ArgSlice key, ArgSlice[] fields, out ArgSlice[] values)
+            => storageSession.HashGetMultiple(key, fields, out values, ref objectContext);
+
+        /// <inheritdoc />
         public GarnetStatus HashLength(ArgSlice key, out int count)
         => storageSession.HashLength(key, out count, ref objectContext);
 
         /// <inheritdoc />
         public GarnetStatus HashLength(byte[] key, ArgSlice input, out ObjectOutputHeader output)
             => storageSession.HashLength(key, input, out output, ref objectContext);
+
+        /// <inheritdoc />
+        public GarnetStatus HashStrLength(byte[] key, ArgSlice input, out ObjectOutputHeader output)
+            => storageSession.HashStrLength(key, input, out output, ref objectContext);
 
         /// <inheritdoc />
         public GarnetStatus HashExists(ArgSlice key, ArgSlice field, out bool exists)
@@ -362,7 +421,7 @@ namespace Garnet.server
 
         /// <inheritdoc />
         public GarnetStatus HashRandomField(byte[] key, ArgSlice input, ref GarnetObjectStoreOutput outputFooter)
-            => storageSession.HashGet(key, input, ref outputFooter, ref objectContext);
+            => storageSession.HashRandomField(key, input, ref outputFooter, ref objectContext);
 
         /// <inheritdoc />
         public GarnetStatus HashDelete(byte[] key, ArgSlice input, out ObjectOutputHeader output)

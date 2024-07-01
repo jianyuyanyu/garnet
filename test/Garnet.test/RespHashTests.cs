@@ -1,10 +1,13 @@
 ﻿// Copyright (c) Microsoft Corporation.
+// // Copyright (c) Microsoft Corporation.
+// // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
 using System;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Garnet.server;
 using NUnit.Framework;
 using StackExchange.Redis;
 
@@ -36,11 +39,21 @@ namespace Garnet.test
         #region SEClientTests
 
         [Test]
+        public void CanSetEmpty()
+        {
+            using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
+            var db = redis.GetDatabase(0);
+            db.HashSet("user:user1", []);
+            var exists = db.KeyExists("user:user1");
+            Assert.IsFalse(exists);
+        }
+
+        [Test]
         public void CanSetAndGetOnePair()
         {
             using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
             var db = redis.GetDatabase(0);
-            db.HashSet("user:user1", new HashEntry[] { new HashEntry("Title", "Tsavorite") });
+            db.HashSet("user:user1", [new HashEntry("Title", "Tsavorite")]);
             string r = db.HashGet("user:user1", "Title");
             Assert.AreEqual("Tsavorite", r);
         }
@@ -51,7 +64,7 @@ namespace Garnet.test
             using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
             var db = redis.GetDatabase(0);
             var str = new string(new char[150000]);
-            db.HashSet("user:user1", new HashEntry[] { new HashEntry("Title", str) });
+            db.HashSet("user:user1", [new HashEntry("Title", str)]);
             string r = db.HashGet("user:user1", "Title");
             Assert.AreEqual(str, r);
             string r2 = db.HashGet("user:user1", "Title2");
@@ -83,8 +96,8 @@ namespace Garnet.test
         {
             using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
             var db = redis.GetDatabase(0);
-            db.HashSet("user:user1", new HashEntry[] { new HashEntry("Title", "Tsavorite"), new HashEntry("Year", "2021") });
-            var result = db.HashGet("user:user1", new RedisValue[] { new RedisValue("Title"), new RedisValue("Year") });
+            db.HashSet("user:user1", [new HashEntry("Title", "Tsavorite"), new HashEntry("Year", "2021")]);
+            var result = db.HashGet("user:user1", [new RedisValue("Title"), new RedisValue("Year")]);
             Assert.AreEqual(2, result.Length);
             Assert.AreEqual("Tsavorite", result[0].ToString());
             Assert.AreEqual("2021", result[1].ToString());
@@ -97,7 +110,7 @@ namespace Garnet.test
         {
             using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
             var db = redis.GetDatabase(0);
-            db.HashSet("user:user1", new HashEntry[] { new HashEntry("Title", "Tsavorite"), new HashEntry("Year", "2021") });
+            db.HashSet("user:user1", [new HashEntry("Title", "Tsavorite"), new HashEntry("Year", "2021")]);
             var result = db.HashDelete(new RedisKey("user:user1"), new RedisValue("Title"));
             Assert.AreEqual(true, result);
             string resultGet = db.HashGet("user:user1", "Year");
@@ -106,23 +119,28 @@ namespace Garnet.test
 
 
         [Test]
-        public void CanDeleleteMultipleFields()
+        public void CanDeleteMultipleFields()
         {
             using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
             var db = redis.GetDatabase(0);
-            db.HashSet("user:user1", new HashEntry[] { new HashEntry("Title", "Tsavorite"), new HashEntry("Year", "2021"), new HashEntry("Example", "One") });
-            var result = db.HashDelete(new RedisKey("user:user1"), new RedisValue[] { new RedisValue("Title"), new RedisValue("Year") });
+            db.HashSet("user:user1", [new HashEntry("Title", "Tsavorite"), new HashEntry("Year", "2021"), new HashEntry("Example", "One")]);
+            var result = db.HashDelete(new RedisKey("user:user1"), [new RedisValue("Title"), new RedisValue("Year")]);
             string resultGet = db.HashGet("user:user1", "Example");
             Assert.AreEqual("One", resultGet);
+
+            result = db.HashDelete(new RedisKey("user:user1"), [new RedisValue("Example")]);
+            Assert.AreEqual(1, result);
+            var exists = db.KeyExists("user:user1");
+            Assert.IsFalse(exists);
         }
 
         [Test]
-        public void CanDeleleteMultipleFieldsWithNonExistingField()
+        public void CanDeleteMultipleFieldsWithNonExistingField()
         {
             using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
             var db = redis.GetDatabase(0);
-            db.HashSet("user:user1", new HashEntry[] { new HashEntry("Title", "Tsavorite"), new HashEntry("Year", "2021") });
-            var result = db.HashDelete(new RedisKey("user:user1"), new RedisValue[] { new RedisValue("Title"), new RedisValue("Year"), new RedisValue("Unknown") });
+            db.HashSet("user:user1", [new HashEntry("Title", "Tsavorite"), new HashEntry("Year", "2021")]);
+            var result = db.HashDelete(new RedisKey("user:user1"), [new RedisValue("Title"), new RedisValue("Year"), new RedisValue("Unknown")]);
             Assert.AreEqual(2, result);
         }
 
@@ -131,7 +149,7 @@ namespace Garnet.test
         {
             using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
             var db = redis.GetDatabase(0);
-            db.HashSet("user:user1", new HashEntry[] { new HashEntry("Title", "Tsavorite"), new HashEntry("Year", "2021"), new HashEntry("Company", "Acme") });
+            db.HashSet("user:user1", [new HashEntry("Title", "Tsavorite"), new HashEntry("Year", "2021"), new HashEntry("Company", "Acme")]);
             var result = db.HashLength("user:user1");
             Assert.AreEqual(3, result);
         }
@@ -141,18 +159,21 @@ namespace Garnet.test
         {
             using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
             var db = redis.GetDatabase(0);
-            db.HashSet("user:user1", new HashEntry[] { new HashEntry("Title", "Tsavorite"), new HashEntry("Year", "2021"), new HashEntry("Company", "Acme") });
-            HashEntry[] result = db.HashGetAll("user:user1");
-            Assert.AreEqual(3, result.Length);
+            HashEntry[] hashEntries =
+                [new HashEntry("Title", "Tsavorite"), new HashEntry("Year", "2021"), new HashEntry("Company", "Acme")];
+            db.HashSet("user:user1", hashEntries);
+            var result = db.HashGetAll("user:user1");
+            Assert.AreEqual(hashEntries.Length, result.Length);
+            Assert.AreEqual(hashEntries.Length, result.Select(r => r.Name).Distinct().Count());
+            Assert.IsTrue(hashEntries.OrderBy(e => e.Name).SequenceEqual(result.OrderBy(r => r.Name)));
         }
-
 
         [Test]
         public void CanDoHExists()
         {
             using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
             var db = redis.GetDatabase(0);
-            db.HashSet("user:user1", new HashEntry[] { new HashEntry("Title", "Tsavorite"), new HashEntry("Year", "2021"), new HashEntry("Company", "Acme") });
+            db.HashSet("user:user1", [new HashEntry("Title", "Tsavorite"), new HashEntry("Year", "2021"), new HashEntry("Company", "Acme")]);
             var result = db.HashExists(new RedisKey("user:user1"), new RedisValue("Company"));
             Assert.AreEqual(true, result);
 
@@ -160,13 +181,26 @@ namespace Garnet.test
             Assert.AreEqual(false, result);
         }
 
+        [Test]
+        public void CanDoHStrLen()
+        {
+            using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
+            var db = redis.GetDatabase(0);
+            db.HashSet("user.user1", [new HashEntry("Title", "Tsavorite")]);
+            long r = db.HashStringLength("user.user1", "Title");
+            Assert.AreEqual(9, r, 0);
+            r = db.HashStringLength("user.user1", "NoExist");
+            Assert.AreEqual(0, r, 0);
+            r = db.HashStringLength("user.user2", "Title");
+            Assert.AreEqual(0, r, 0);
+        }
 
         [Test]
         public void CanDoHKeys()
         {
             using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
             var db = redis.GetDatabase(0);
-            db.HashSet("user:user1", new HashEntry[] { new HashEntry("Title", "Tsavorite"), new HashEntry("Year", "2021"), new HashEntry("Company", "Acme") });
+            db.HashSet("user:user1", [new HashEntry("Title", "Tsavorite"), new HashEntry("Year", "2021"), new HashEntry("Company", "Acme")]);
             var result = db.HashKeys("user:user1");
             Assert.AreEqual(3, result.Length);
 
@@ -181,7 +215,7 @@ namespace Garnet.test
         {
             using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
             var db = redis.GetDatabase(0);
-            db.HashSet("user:user1", new HashEntry[] { new HashEntry("Title", "Tsavorite"), new HashEntry("Year", "2021"), new HashEntry("Company", "Acme") });
+            db.HashSet("user:user1", [new HashEntry("Title", "Tsavorite"), new HashEntry("Year", "2021"), new HashEntry("Company", "Acme")]);
             var result = db.HashValues("user:user1");
             Assert.AreEqual(3, result.Length);
 
@@ -196,7 +230,7 @@ namespace Garnet.test
         {
             using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
             var db = redis.GetDatabase(0);
-            db.HashSet("user:user1", new HashEntry[] { new HashEntry("Field1", "StringValue"), new HashEntry("Field2", "1") });
+            db.HashSet("user:user1", [new HashEntry("Field1", "StringValue"), new HashEntry("Field2", "1")]);
             Assert.Throws<RedisServerException>(() => db.HashIncrement(new RedisKey("user:user1"), new RedisValue("Field1"), 4));
             var result = db.HashIncrement(new RedisKey("user:user1"), new RedisValue("Field2"), -4);
             Assert.AreEqual(-3, result);
@@ -216,7 +250,7 @@ namespace Garnet.test
 
             // Create LTM (larger than memory) DB by inserting 100 keys
             for (int i = 0; i < 100; i++)
-                db.HashSet("user:user" + i, new HashEntry[] { new HashEntry("Field1", "StringValue"), new HashEntry("Field2", "1") });
+                db.HashSet("user:user" + i, [new HashEntry("Field1", "StringValue"), new HashEntry("Field2", "1")]);
 
             Assert.Throws<RedisServerException>(() => db.HashIncrement(new RedisKey("user:user1"), new RedisValue("Field1"), 4));
             var result = db.HashIncrement(new RedisKey("user:user1"), new RedisValue("Field2"), -4);
@@ -235,7 +269,7 @@ namespace Garnet.test
         {
             using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
             var db = redis.GetDatabase(0);
-            db.HashSet("user:user1", new HashEntry[] { new HashEntry("Field1", "StringValue"), new HashEntry("Field2", "1") });
+            db.HashSet("user:user1", [new HashEntry("Field1", "StringValue"), new HashEntry("Field2", "1")]);
             var result = db.HashDecrement(new RedisKey("user:user1"), new RedisValue("Field2"), 4);
             Assert.AreEqual(-3, result);
         }
@@ -251,6 +285,72 @@ namespace Garnet.test
             db.HashSet(new RedisKey("user:user1"), new RedisValue("Field"), new RedisValue("World"), When.NotExists);
             result = db.HashGet("user:user1", "Field");
             Assert.AreEqual("Hello", result);
+        }
+
+        [Test]
+        public void CanDoRandomField()
+        {
+            using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
+            var db = redis.GetDatabase(0);
+
+            var hashKey = new RedisKey("user:user1");
+            HashEntry[] hashEntries =
+                [new HashEntry("Title", "Tsavorite"), new HashEntry("Year", "2021"), new HashEntry("Company", "Acme")];
+            var hashDict = hashEntries.ToDictionary(e => e.Name, e => e.Value);
+            db.HashSet(hashKey, hashEntries);
+
+            // Check HRANDFIELD with wrong number of arguments
+            var ex = Assert.Throws<RedisServerException>(() => db.Execute("HRANDFIELD", hashKey, 3, "WITHVALUES", "bla"));
+            var expectedMessage = string.Format(CmdStrings.GenericErrWrongNumArgs, nameof(RespCommand.HRANDFIELD));
+            Assert.IsNotNull(ex);
+            Assert.AreEqual(expectedMessage, ex.Message);
+
+            // Check HRANDFIELD with non-numeric count
+            ex = Assert.Throws<RedisServerException>(() => db.Execute("HRANDFIELD", hashKey, "bla"));
+            expectedMessage = Encoding.ASCII.GetString(CmdStrings.RESP_ERR_GENERIC_VALUE_IS_NOT_INTEGER);
+            Assert.IsNotNull(ex);
+            Assert.AreEqual(expectedMessage, ex.Message);
+
+            // Check HRANDFIELD with syntax error
+            ex = Assert.Throws<RedisServerException>(() => db.Execute("HRANDFIELD", hashKey, 3, "withvalue"));
+            expectedMessage = Encoding.ASCII.GetString(CmdStrings.RESP_SYNTAX_ERROR);
+            Assert.IsNotNull(ex);
+            Assert.AreEqual(expectedMessage, ex.Message);
+
+            // HRANDFIELD without count
+            var field = db.HashRandomField(hashKey);
+            Assert.IsFalse(field.IsNull);
+            Assert.Contains(field, hashDict.Keys);
+
+            // HRANDFIELD with positive count (distinct)
+            var fields = db.HashRandomFields(hashKey, 2);
+            Assert.AreEqual(2, fields.Length);
+            Assert.AreEqual(2, fields.Distinct().Count());
+            Assert.IsTrue(fields.All(hashDict.ContainsKey));
+
+            // HRANDFIELD with positive count (distinct) with values
+            var fieldsWithValues = db.HashRandomFieldsWithValues(hashKey, 2);
+            Assert.AreEqual(2, fieldsWithValues.Length);
+            Assert.AreEqual(2, fieldsWithValues.Distinct().Count());
+            Assert.IsTrue(fieldsWithValues.All(e => hashDict.ContainsKey(e.Name) && hashDict[e.Name] == e.Value));
+
+            // HRANDFIELD with positive count (distinct) greater than hash cardinality
+            fields = db.HashRandomFields(hashKey, 5);
+            Assert.AreEqual(fields.Length, fields.Length);
+            Assert.AreEqual(fields.Length, fields.Distinct().Count());
+            Assert.IsTrue(fields.All(hashDict.ContainsKey));
+
+            // HRANDFIELD with negative count (non-distinct)
+            fields = db.HashRandomFields(hashKey, -8);
+            Assert.AreEqual(8, fields.Length);
+            Assert.GreaterOrEqual(3, fields.Distinct().Count());
+            Assert.IsTrue(fields.All(hashDict.ContainsKey));
+
+            // HRANDFIELD with negative count (non-distinct) with values
+            fieldsWithValues = db.HashRandomFieldsWithValues(hashKey, -8);
+            Assert.AreEqual(8, fieldsWithValues.Length);
+            Assert.GreaterOrEqual(3, fieldsWithValues.Select(e => e.Name).Distinct().Count());
+            Assert.IsTrue(fieldsWithValues.All(e => hashDict.ContainsKey(e.Name) && hashDict[e.Name] == e.Value));
         }
 
         [Test]
@@ -280,16 +380,28 @@ namespace Garnet.test
             // HSCAN non existing key
             var members = db.HashScan("foo");
             Assert.IsTrue(((IScanningCursor)members).Cursor == 0);
-            Assert.IsTrue(members.Count() == 0, "HSCAN non existing key failed.");
+            Assert.IsEmpty(members, "HSCAN non existing key failed.");
 
-            db.HashSet("user:user1", new HashEntry[] { new HashEntry("name", "Alice"), new HashEntry("email", "email@example.com"), new HashEntry("age", "30") });
+            db.HashSet("user:user1", [new HashEntry("name", "Alice"), new HashEntry("email", "email@example.com"), new HashEntry("age", "30")]);
+
+            // HSCAN without key
+            try
+            {
+                db.Execute("HSCAN");
+                Assert.Fail();
+            }
+            catch (RedisServerException e)
+            {
+                var expectedErrorMessage = string.Format(CmdStrings.GenericErrWrongNumArgs, nameof(HashOperation.HSCAN));
+                Assert.AreEqual(expectedErrorMessage, e.Message);
+            }
 
             // HSCAN without parameters
             members = db.HashScan("user:user1");
             Assert.IsTrue(((IScanningCursor)members).Cursor == 0);
             Assert.IsTrue(members.Count() == 3, "HSCAN without MATCH failed.");
 
-            db.HashSet("user:user789", new HashEntry[] { new HashEntry("email", "email@example.com"), new HashEntry("email1", "email1@example.com"), new HashEntry("email2", "email2@example.com"), new HashEntry("email3", "email3@example.com"), new HashEntry("age", "25") });
+            db.HashSet("user:user789", [new HashEntry("email", "email@example.com"), new HashEntry("email1", "email1@example.com"), new HashEntry("email2", "email2@example.com"), new HashEntry("email3", "email3@example.com"), new HashEntry("age", "25")]);
 
             // HSCAN with match
             members = db.HashScan("user:user789", "email*");
@@ -359,7 +471,7 @@ namespace Garnet.test
 
             db.KeyDelete(hashkey, CommandFlags.FireAndForget);
 
-            RedisValue[] fields = { "foo", "bar", "blop" };
+            RedisValue[] fields = ["foo", "bar", "blop"];
             var arr0 = await db.HashGetAsync(hashkey, fields);
 
             db.HashSet(hashkey, "foo", "abc", flags: CommandFlags.FireAndForget);
@@ -409,6 +521,30 @@ namespace Garnet.test
             Assert.AreEqual("abc", result["foo"]);
             Assert.AreEqual("def", result["bar"]);
         }
+        [Test]
+        public async Task CanDoHMSETMultipleTimes()
+        {
+            using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
+            var db = redis.GetDatabase(0);
+            var hashKey = "testCanDoHMSET";
+            var hashMapKey = "TestKey";
+
+            await db.KeyDeleteAsync(hashKey);
+
+            var val0 = await db.HashGetAsync(hashKey, hashMapKey);
+            await db.HashSetAsync(hashKey, [new HashEntry(hashMapKey, "TestValue1")]);
+
+            var val1 = await db.HashGetAsync(hashKey, hashMapKey);
+            await db.HashSetAsync(hashKey, [new HashEntry(hashMapKey, "TestValue2")]);
+
+            var val2 = await db.HashGetAsync(hashKey, hashMapKey);
+
+#nullable enable
+            Assert.Null((string?)val0);
+            Assert.AreEqual("TestValue1", (string?)val1);
+            Assert.AreEqual("TestValue2", (string?)val2);
+#nullable disable
+        }
 
         [Test]
         public async Task CanDoHSETWhenAlwaysAsync()
@@ -417,7 +553,7 @@ namespace Garnet.test
             var db = redis.GetDatabase(0);
             var hashkey = "testWhenAlways";
 
-            db.KeyDelete(hashkey, CommandFlags.FireAndForget);
+            await db.KeyDeleteAsync(hashkey);
 
             var result1 = await db.HashSetAsync(hashkey, "foo", "bar", When.Always, CommandFlags.None);
             var result2 = await db.HashSetAsync(hashkey, "foo2", "bar", When.Always, CommandFlags.None);
@@ -463,7 +599,79 @@ namespace Garnet.test
             Assert.AreEqual("value3", (string?)val3);
             Assert.False(set3);
 #nullable disable
+        }
 
+        [Test]
+        public void CheckEmptyHashKeyRemoved()
+        {
+            using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
+            var key = new RedisKey("user1:hash");
+            var db = redis.GetDatabase(0);
+
+            db.HashSet(key, [new HashEntry("Title", "Tsavorite"), new HashEntry("Year", "2021")]);
+
+            var result = db.HashDelete(key, new RedisValue("Title"));
+            Assert.IsTrue(result);
+            result = db.HashDelete(key, new RedisValue("Year"));
+            Assert.IsTrue(result);
+
+            var keyExists = db.KeyExists(key);
+            Assert.IsFalse(keyExists);
+        }
+
+        [Test]
+        public void CheckHashOperationsOnWrongTypeObjectSE()
+        {
+            using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
+            var db = redis.GetDatabase(0);
+
+            var keys = new[] { new RedisKey("user1:obj1"), new RedisKey("user1:obj2") };
+            var key1Values = new[] { new RedisValue("Hello"), new RedisValue("World") };
+            var key2Values = new[] { new RedisValue("Hola"), new RedisValue("Mundo") };
+            var values = new[] { key1Values, key2Values };
+            var hashFields = new[]
+            {
+                new[] { new RedisValue("K1_H1"), new RedisValue("K1_H2") },
+                new[] { new RedisValue("K2_H1"), new RedisValue("K2_H2") }
+            };
+            var hashEntries = hashFields.Select((h, idx) => h
+                    .Zip(values[idx], (n, v) => new HashEntry(n, v)).ToArray()).ToArray();
+
+            // Set up different type objects
+            RespTestsUtils.SetUpTestObjects(db, GarnetObjectType.List, keys, values);
+
+            // HGET
+            RespTestsUtils.CheckCommandOnWrongTypeObjectSE(() => db.HashGet(keys[0], hashFields[0][0]));
+            // HMGET
+            RespTestsUtils.CheckCommandOnWrongTypeObjectSE(() => db.HashGet(keys[0], hashFields[0]));
+            // HSET
+            RespTestsUtils.CheckCommandOnWrongTypeObjectSE(() => db.HashSet(keys[0], hashFields[0][0], values[0][0]));
+            // HMSET
+            RespTestsUtils.CheckCommandOnWrongTypeObjectSE(() => db.HashSet(keys[0], hashEntries[0]));
+            // HSETNX
+            RespTestsUtils.CheckCommandOnWrongTypeObjectSE(() => db.HashSet(keys[0], hashFields[0][0], values[0][0], When.NotExists));
+            // HLEN
+            RespTestsUtils.CheckCommandOnWrongTypeObjectSE(() => db.HashLength(keys[0]));
+            // HDEL
+            RespTestsUtils.CheckCommandOnWrongTypeObjectSE(() => db.HashDelete(keys[0], hashFields[0]));
+            // HEXISTS
+            RespTestsUtils.CheckCommandOnWrongTypeObjectSE(() => db.HashExists(keys[0], hashFields[0][0]));
+            // HGETALL
+            RespTestsUtils.CheckCommandOnWrongTypeObjectSE(() => db.HashGetAll(keys[0]));
+            // HKEYS
+            RespTestsUtils.CheckCommandOnWrongTypeObjectSE(() => db.HashKeys(keys[0]));
+            // HVALS
+            RespTestsUtils.CheckCommandOnWrongTypeObjectSE(() => db.HashValues(keys[0]));
+            // HINCRBY
+            RespTestsUtils.CheckCommandOnWrongTypeObjectSE(() => db.HashIncrement(keys[0], hashFields[0][0], 2L));
+            // HINCRBYFLOAT
+            RespTestsUtils.CheckCommandOnWrongTypeObjectSE(() => db.HashIncrement(keys[0], hashFields[0][0], 2.2));
+            // HRANDFIELD
+            RespTestsUtils.CheckCommandOnWrongTypeObjectSE(() => db.HashRandomField(keys[0]));
+            // HSCAN
+            RespTestsUtils.CheckCommandOnWrongTypeObjectSE(() => db.HashScan(keys[0], new RedisValue("*")).FirstOrDefault());
+            //HSTRLEN
+            RespTestsUtils.CheckCommandOnWrongTypeObjectSE(() => db.HashStringLength(keys[0], hashFields[0][0]));
         }
 
         #endregion
@@ -643,11 +851,50 @@ namespace Garnet.test
 
             //missing paramenters
             response = lightClientRequest.SendCommand("HEXISTS foo");
-            expectedResponse = "-ERR wrong number of arguments for HEXISTS command.\r\n";
+            expectedResponse = FormatWrongNumOfArgsError("HEXISTS");
             actualValue = Encoding.ASCII.GetString(response).Substring(0, expectedResponse.Length);
             Assert.AreEqual(expectedResponse, actualValue);
         }
 
+        [Test]
+        public void CanDoHStrLenLC()
+        {
+            using var lightClientRequest = TestUtils.CreateRequest();
+            var response = lightClientRequest.SendCommand("HSET myhash field1 myvalue");
+            var expectedResponse = ":1\r\n";
+            var actualValue = Encoding.ASCII.GetString(response).Substring(0, expectedResponse.Length);
+            Assert.AreEqual(expectedResponse, actualValue);
+
+            // get an existing field
+            response = lightClientRequest.SendCommand("HSTRLEN myhash field1");
+            expectedResponse = ":7\r\n";
+            actualValue = Encoding.ASCII.GetString(response).Substring(0, expectedResponse.Length);
+            Assert.AreEqual(expectedResponse, actualValue);
+
+            // get an nonexisting field
+            response = lightClientRequest.SendCommand("HSTRLEN myhash field0");
+            expectedResponse = ":0\r\n";
+            actualValue = Encoding.ASCII.GetString(response).Substring(0, expectedResponse.Length);
+            Assert.AreEqual(expectedResponse, actualValue);
+
+            //non existing hash
+            response = lightClientRequest.SendCommand("HSTRLEN foo field0");
+            expectedResponse = ":0\r\n";
+            actualValue = Encoding.ASCII.GetString(response).Substring(0, expectedResponse.Length);
+            Assert.AreEqual(expectedResponse, actualValue);
+
+            //missing paramenters
+            response = lightClientRequest.SendCommand("HSTRLEN foo");
+            expectedResponse = FormatWrongNumOfArgsError("HSTRLEN");
+            actualValue = Encoding.ASCII.GetString(response).Substring(0, expectedResponse.Length);
+            Assert.AreEqual(expectedResponse, actualValue);
+
+            //too many paramenters
+            response = lightClientRequest.SendCommand("HSTRLEN foo field0 field1");
+            expectedResponse = FormatWrongNumOfArgsError("HSTRLEN");
+            actualValue = Encoding.ASCII.GetString(response).Substring(0, expectedResponse.Length);
+            Assert.AreEqual(expectedResponse, actualValue);
+        }
 
         [Test]
         public void CanDoIncrByLC()
@@ -739,7 +986,7 @@ namespace Garnet.test
 
             // Check correct error message when incorrect number of parameters
             response = lightClientRequest.SendCommand("HRANDFIELD");
-            expectedResponse = "-ERR wrong number of arguments for HRANDFIELD command.";
+            expectedResponse = FormatWrongNumOfArgsError("HRANDFIELD");
             actualValue = Encoding.ASCII.GetString(response).Substring(0, expectedResponse.Length);
             Assert.AreEqual(expectedResponse, actualValue);
 
@@ -847,7 +1094,7 @@ namespace Garnet.test
         }
 
 
-        private void UpdateHashMap(string keyName)
+        private static void UpdateHashMap(string keyName)
         {
             using var lightClientRequest = TestUtils.CreateRequest();
             byte[] res = lightClientRequest.SendCommand($"HSET {keyName} field3 3");
@@ -894,7 +1141,7 @@ namespace Garnet.test
         {
             using var lightClientRequest = TestUtils.CreateRequest();
             var response = lightClientRequest.SendCommands("HINCRBY foo", "PING HELLO", 1, 1);
-            var expectedResponse = "-ERR wrong number of arguments for HINCRBY command.\r\n$5\r\nHELLO\r\n";
+            var expectedResponse = $"{FormatWrongNumOfArgsError("HINCRBY")}$5\r\nHELLO\r\n";
             var actualValue = Encoding.ASCII.GetString(response).Substring(0, expectedResponse.Length);
             Assert.AreEqual(expectedResponse, actualValue);
         }
@@ -904,13 +1151,14 @@ namespace Garnet.test
         {
             using var lightClientRequest = TestUtils.CreateRequest();
             var response = lightClientRequest.SendCommands("HINCRBYFLOAT foo", "PING HELLO", 1, 1);
-            var expectedResponse = "-ERR wrong number of arguments for HINCRBYFLOAT command.\r\n$5\r\nHELLO\r\n";
+            var expectedResponse = $"{FormatWrongNumOfArgsError("HINCRBYFLOAT")}$5\r\nHELLO\r\n";
             var actualValue = Encoding.ASCII.GetString(response).Substring(0, expectedResponse.Length);
             Assert.AreEqual(expectedResponse, actualValue);
         }
 
         #endregion
 
+        private static string FormatWrongNumOfArgsError(string commandName) => $"-{string.Format(CmdStrings.GenericErrWrongNumArgs, commandName)}\r\n";
     }
 
 }

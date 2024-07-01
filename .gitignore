@@ -165,6 +165,8 @@ ClientBin/
 *.publishsettings
 node_modules/
 **/log-commits
+.mono
+**/package-lock.json
 
 # RIA/Silverlight projects
 Generated_Code/
@@ -212,3 +214,6 @@ test/tmp/
 # IDE files
 .vscode/
 .idea/
+
+# BenchmarkDotNet Results
+BenchmarkDotNet.Artifacts/

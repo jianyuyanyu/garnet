@@ -2,7 +2,6 @@
 // Licensed under the MIT license.
 
 using System;
-using System.Text;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 
@@ -13,31 +12,29 @@ namespace Garnet.cluster
         /// <summary>
         /// Begin migration task
         /// </summary>
-        /// <param name="resp"></param>
+        /// <param name="errorMessage">The ASCII encoded error message if the method returned <see langword="false"/>; otherwise <see langword="default"/></param>
         /// <returns></returns>
-        public bool StartMigrationTask(out ReadOnlySpan<byte> resp)
+        public bool TryStartMigrationTask(out ReadOnlySpan<byte> errorMessage)
         {
-            resp = CmdStrings.RESP_OK;
-            if (_keysWithSize != null)
+            errorMessage = default;
+            if (transferOption == TransferOption.KEYS)
             {
                 try
                 {
                     // This executes synchronously and serves the keys variant of resp command
                     if (!MigrateKeys())
                     {
-                        resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes("-IOERR Migrate keys failed.\r\n"));
+                        errorMessage = "IOERR Migrate keys failed."u8;
                         Status = MigrateState.FAIL;
                         return false;
                     }
 
-                    // Delete keys locally if option enabled
-                    if (_copyOption)
-                        DeleteKeys(_keysWithSize);
                     Status = MigrateState.SUCCESS;
                 }
                 finally
                 {
-                    clusterProvider.migrationManager.TryRemoveMigrationTask(this);
+                    if (!clusterProvider.migrationManager.TryRemoveMigrationTask(this))
+                        logger?.LogError("Could not remove MIGRATE KEYS session");
                 }
             }
             else
@@ -61,7 +58,7 @@ namespace Garnet.cluster
                 if (!TrySetSlotRanges(GetSourceNodeId, MigrateState.IMPORT))
                 {
                     logger?.LogError("Failed to set remote slots {slots} to import state", string.Join(',', GetSlots));
-                    RecoverFromFailure();
+                    TryRecoverFromFailure();
                     Status = MigrateState.FAIL;
                     return;
                 }
@@ -71,20 +68,20 @@ namespace Garnet.cluster
                 if (!TryPrepareLocalForMigration())
                 {
                     logger?.LogError("Failed to set local slots {slots} to migrate state", string.Join(',', GetSlots));
-                    RecoverFromFailure();
+                    TryRecoverFromFailure();
                     Status = MigrateState.FAIL;
                     return;
                 }
 
-                if (!clusterProvider.WaitForConfigTransition()) return;
+                if (!clusterProvider.BumpAndWaitForEpochTransition()) return;
                 #endregion
 
                 #region migrateData
                 //3. Migrate actual data
-                if (!MigrateSlotsDataDriver())
+                if (!MigrateSlotsDriver())
                 {
                     logger?.LogError($"MigrateSlotsDriver failed");
-                    RecoverFromFailure();
+                    TryRecoverFromFailure();
                     Status = MigrateState.FAIL;
                     return;
                 }
@@ -95,7 +92,7 @@ namespace Garnet.cluster
                 if (!RelinquishOwnership())
                 {
                     logger?.LogError($"Failed to relinquish ownerhsip to target node");
-                    RecoverFromFailure();
+                    TryRecoverFromFailure();
                     Status = MigrateState.FAIL;
                     return;
                 }
@@ -104,16 +101,13 @@ namespace Garnet.cluster
                 if (!TrySetSlotRanges(GetTargetNodeId, MigrateState.NODE))
                 {
                     logger?.LogError($"Failed to assign ownerhsip to target node");
-                    RecoverFromFailure();
+                    TryRecoverFromFailure();
                     Status = MigrateState.FAIL;
                     return;
                 }
                 #endregion
 
-                //7. Delete keys in slot and remove migrate task from set of active migration tasks.            
-                DeleteKeysInSlot();
-
-                //8. Enqueue success log
+                //7. Enqueue success log
                 Status = MigrateState.SUCCESS;
             }
             catch (Exception ex)

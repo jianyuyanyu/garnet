@@ -2,11 +2,12 @@
 // Licensed under the MIT license.
 
 using System;
+using System.IO;
 using NUnit.Framework;
 using Tsavorite.core;
 using static Tsavorite.test.TestUtils;
 
-namespace Tsavorite.test
+namespace Tsavorite.test.spanbyte
 {
     [TestFixture]
     internal class SpanByteVLVectorTests
@@ -22,12 +23,13 @@ namespace Tsavorite.test
         {
             DeleteDirectory(MethodTestDir, wait: true);
 
-            var log = Devices.CreateLogDevice(MethodTestDir + "/hlog1.log", deleteOnClose: true);
+            var log = Devices.CreateLogDevice(Path.Join(MethodTestDir, "hlog1.log"), deleteOnClose: true);
             var store = new TsavoriteKV<SpanByte, SpanByte>
                 (128,
                 new LogSettings { LogDevice = log, MemorySizeBits = 17, PageSizeBits = 12 },
                 null, null, null);
-            var s = store.NewSession<SpanByte, int[], Empty, VLVectorFunctions>(new VLVectorFunctions());
+            var session = store.NewSession<SpanByte, int[], Empty, VLVectorFunctions>(new VLVectorFunctions());
+            var bContext = session.BasicContext;
 
             // Single alloc outside the loop, to the max length we'll need.
             Span<int> keySpan = stackalloc int[1];
@@ -44,7 +46,7 @@ namespace Tsavorite.test
                     valueSpan[j] = len;
                 var valueSpanByte = valueSpan.Slice(0, len).AsSpanByte();
 
-                s.Upsert(ref keySpanByte, ref valueSpanByte, Empty.Default, 0);
+                bContext.Upsert(ref keySpanByte, ref valueSpanByte, Empty.Default);
             }
 
             // Reset rng to get the same sequence of value lengths
@@ -56,11 +58,11 @@ namespace Tsavorite.test
 
                 var valueLen = GetRandomLength(rng);
                 int[] output = null;
-                var status = s.Read(ref keySpanByte, ref output, Empty.Default, 0);
+                var status = bContext.Read(ref keySpanByte, ref output, Empty.Default);
 
                 if (status.IsPending)
                 {
-                    s.CompletePendingWithOutputs(out var outputs, wait: true);
+                    bContext.CompletePendingWithOutputs(out var outputs, wait: true);
                     (status, output) = GetSinglePendingResult(outputs);
                 }
 
@@ -69,7 +71,7 @@ namespace Tsavorite.test
                 for (int j = 0; j < valueLen; j++)
                     Assert.AreEqual(valueLen, output[j]);
             }
-            s.Dispose();
+            session.Dispose();
             store.Dispose();
             log.Dispose();
             DeleteDirectory(MethodTestDir);
@@ -82,12 +84,13 @@ namespace Tsavorite.test
         {
             DeleteDirectory(MethodTestDir, wait: true);
 
-            var log = Devices.CreateLogDevice(MethodTestDir + "/hlog1.log", deleteOnClose: true);
+            var log = Devices.CreateLogDevice(Path.Join(MethodTestDir, "hlog1.log"), deleteOnClose: true);
             var store = new TsavoriteKV<SpanByte, SpanByte>
                 (128,
                 new LogSettings { LogDevice = log, MemorySizeBits = 17, PageSizeBits = 12 },
                 null, null, null);
-            var s = store.NewSession<SpanByte, int[], Empty, VLVectorFunctions>(new VLVectorFunctions());
+            var session = store.NewSession<SpanByte, int[], Empty, VLVectorFunctions>(new VLVectorFunctions());
+            var bContext = session.BasicContext;
 
             // Single alloc outside the loop, to the max length we'll need.
             Span<int> keySpan = stackalloc int[StackAllocMax];
@@ -106,7 +109,7 @@ namespace Tsavorite.test
                     valueSpan[j] = valueLen;
                 var valueSpanByte = valueSpan.Slice(0, valueLen).AsSpanByte();
 
-                s.Upsert(ref keySpanByte, ref valueSpanByte, Empty.Default, 0);
+                bContext.Upsert(ref keySpanByte, ref valueSpanByte, Empty.Default);
             }
 
             // Reset rng to get the same sequence of key and value lengths
@@ -120,11 +123,11 @@ namespace Tsavorite.test
 
                 var valueLen = GetRandomLength(rng);
                 int[] output = null;
-                var status = s.Read(ref keySpanByte, ref output, Empty.Default, 0);
+                var status = bContext.Read(ref keySpanByte, ref output, Empty.Default);
 
                 if (status.IsPending)
                 {
-                    s.CompletePendingWithOutputs(out var outputs, wait: true);
+                    bContext.CompletePendingWithOutputs(out var outputs, wait: true);
                     (status, output) = GetSinglePendingResult(outputs);
                 }
 
@@ -134,7 +137,7 @@ namespace Tsavorite.test
                     Assert.AreEqual(valueLen, output[j]);
             }
 
-            s.Dispose();
+            session.Dispose();
             store.Dispose();
             log.Dispose();
             DeleteDirectory(MethodTestDir);

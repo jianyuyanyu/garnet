@@ -31,7 +31,8 @@ namespace Garnet.server
         HINCRBY,
         HINCRBYFLOAT,
         HRANDFIELD,
-        HSCAN
+        HSCAN,
+        HSTRLEN
     }
 
 
@@ -48,7 +49,7 @@ namespace Garnet.server
         public HashObject(long expiration = 0)
             : base(expiration, MemoryUtils.DictionaryOverhead)
         {
-            hash = new Dictionary<byte[], byte[]>(new ByteArrayComparer());
+            hash = new Dictionary<byte[], byte[]>(ByteArrayComparer.Instance);
         }
 
         /// <summary>
@@ -57,7 +58,7 @@ namespace Garnet.server
         public HashObject(BinaryReader reader)
             : base(reader, MemoryUtils.DictionaryOverhead)
         {
-            hash = new Dictionary<byte[], byte[]>(new ByteArrayComparer());
+            hash = new Dictionary<byte[], byte[]>(ByteArrayComparer.Instance);
 
             int count = reader.ReadInt32();
             for (int i = 0; i < count; i++)
@@ -107,13 +108,15 @@ namespace Garnet.server
         public override GarnetObjectBase Clone() => new HashObject(hash, Expiration, Size);
 
         /// <inheritdoc />
-        public override unsafe bool Operate(ref SpanByte input, ref SpanByteAndMemory output, out long sizeChange)
+        public override unsafe bool Operate(ref SpanByte input, ref SpanByteAndMemory output, out long sizeChange, out bool removeKey)
         {
+            removeKey = false;
+
             fixed (byte* _input = input.AsSpan())
             fixed (byte* _output = output.SpanByte.AsSpan())
             {
-                var header = (RespInputHeader*)_input;
-                if (header->type != GarnetObjectType.Hash)
+                var header = (ObjectInputHeader*)_input;
+                if (header->header.type != GarnetObjectType.Hash)
                 {
                     //Indicates when there is an incorrect type 
                     output.Length = 0;
@@ -122,7 +125,7 @@ namespace Garnet.server
                 }
 
                 var previousSize = this.Size;
-                switch (header->HashOp)
+                switch (header->header.HashOp)
                 {
                     case HashOperation.HSET:
                         HashSet(_input, input.Length, _output);
@@ -134,16 +137,19 @@ namespace Garnet.server
                         HashGet(_input, input.Length, ref output);
                         break;
                     case HashOperation.HMGET:
-                        HashGet(_input, input.Length, ref output);
+                        HashMultipleGet(_input, input.Length, ref output);
                         break;
                     case HashOperation.HGETALL:
-                        HashGet(_input, input.Length, ref output);
+                        HashGetAll(respProtocolVersion: header->arg1, ref output);
                         break;
                     case HashOperation.HDEL:
                         HashDelete(_input, input.Length, _output);
                         break;
                     case HashOperation.HLEN:
                         HashLength(_output);
+                        break;
+                    case HashOperation.HSTRLEN:
+                        HashStrLength(_input, input.Length, _output);
                         break;
                     case HashOperation.HEXISTS:
                         HashExists(_input, input.Length, _output);
@@ -164,7 +170,7 @@ namespace Garnet.server
                         HashSetWhenNotExists(_input, input.Length, _output);
                         break;
                     case HashOperation.HRANDFIELD:
-                        HashRandomField(_input, input.Length, ref output);
+                        HashRandomField(_input, ref output);
                         break;
                     case HashOperation.HSCAN:
                         if (ObjectUtils.ReadScanInput(_input, input.Length, ref output, out var cursorInput, out var pattern, out var patternLength, out int limitCount, out int bytesDone))
@@ -179,10 +185,12 @@ namespace Garnet.server
 
                 sizeChange = this.Size - previousSize;
             }
+
+            removeKey = hash.Count == 0;
             return true;
         }
 
-        private void UpdateSize(byte[] key, byte[] value, bool add = true)
+        private void UpdateSize(ReadOnlySpan<byte> key, ReadOnlySpan<byte> value, bool add = true)
         {
             var size = Utility.RoundUp(key.Length, IntPtr.Size) + Utility.RoundUp(value.Length, IntPtr.Size)
                 + (2 * MemoryUtils.ByteArrayOverhead) + MemoryUtils.DictionaryEntryOverhead;

@@ -41,7 +41,7 @@ namespace Garnet
             var lstKey = GetNextArg(input, ref offset);
             var lstKeyB = GetNextArg(input, ref offset);
 
-            if (lstKey.length == 0 || lstKeyB.Length == 0)
+            if (lstKey.Length == 0 || lstKeyB.Length == 0)
                 result = false;
 
             if (result)
@@ -68,10 +68,10 @@ namespace Garnet
                         //remove right
                         api.ListRightPop(lstKeyB, out elementPopped);
                         api.ListLength(lstKeyB, out count);
-                        if (elementPopped.length == 0 || count != 7)
+                        if (elementPopped.Length == 0 || count != 7)
                             result = false;
-                        result = api.ListMove(lstKey, lstKeyB, OperationDirection.Left, OperationDirection.Right, out _);
-                        if (result)
+                        var status = api.ListMove(lstKey, lstKeyB, OperationDirection.Left, OperationDirection.Right, out _);
+                        if (status == GarnetStatus.OK)
                         {
                             result = api.ListTrim(lstKeyB, 1, 3);
                         }

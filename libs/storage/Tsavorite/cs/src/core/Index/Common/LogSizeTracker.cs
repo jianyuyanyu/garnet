@@ -3,6 +3,7 @@
 
 using System;
 using System.Diagnostics;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 
@@ -21,6 +22,48 @@ namespace Tsavorite.core
         long CalculateRecordSize(RecordInfo recordInfo, Key key, Value value);
     }
 
+    public enum LogOperationType
+    {
+        Deserialize
+    }
+
+    public class LogOperationObserver<Key, Value, TLogSizeCalculator> : IObserver<ITsavoriteScanIterator<Key, Value>>
+        where TLogSizeCalculator : ILogSizeCalculator<Key, Value>
+    {
+        private readonly LogSizeTracker<Key, Value, TLogSizeCalculator> logSizeTracker;
+        private readonly LogOperationType logOperationType;
+
+        public LogOperationObserver(LogSizeTracker<Key, Value, TLogSizeCalculator> logSizeTracker, LogOperationType logOperationType)
+        {
+            this.logSizeTracker = logSizeTracker;
+            this.logOperationType = logOperationType;
+        }
+
+        public void OnCompleted() { }
+
+        public void OnError(Exception error) { }
+
+        public void OnNext(ITsavoriteScanIterator<Key, Value> records)
+        {
+            long size = 0;
+            while (records.GetNext(out RecordInfo info, out Key key, out Value value))
+            {
+                Debug.Assert(key != null);
+                Debug.Assert(value != null);
+
+                size += logSizeTracker.LogSizeCalculator.CalculateRecordSize(info, key, value);
+            }
+
+            if (size == 0)
+                return;
+
+            if (logOperationType == LogOperationType.Deserialize)
+            {
+                logSizeTracker.IncrementSize(size);
+            }
+        }
+    }
+
     /// <summary>Tracks and controls size of log</summary>
     /// <typeparam name="Key">Type of key</typeparam>
     /// <typeparam name="Value">Type of value</typeparam>
@@ -31,11 +74,14 @@ namespace Tsavorite.core
         private ConcurrentCounter logSize;
         private long lowTargetSize;
         private long highTargetSize;
-        private TLogSizeCalculator logSizeCalculator;
+        public TLogSizeCalculator LogSizeCalculator;
         private readonly ILogger logger;
         internal const int resizeTaskDelaySeconds = 10;
 
         internal LogAccessor<Key, Value> logAccessor;
+
+        /// <summary>Indicates whether resizer task has been stopped</summary>
+        public volatile bool Stopped;
 
         internal Action<int> PostEmptyPageCountIncrease { get; set; } = (int count) => { };
 
@@ -64,10 +110,23 @@ namespace Tsavorite.core
             logSize = new ConcurrentCounter();
             lowTargetSize = targetSize - delta;
             highTargetSize = targetSize + delta;
-            this.logSizeCalculator = logSizeCalculator;
+            this.LogSizeCalculator = logSizeCalculator;
             this.logger = logger;
-            Task.Run(ResizerTask);
+            Stopped = false;
         }
+
+        /// <summary>
+        /// Starts the log size tracker
+        /// NOTE: Not thread safe to start multiple times
+        /// </summary>
+        /// <param name="token"></param>
+        public void Start(CancellationToken token)
+        {
+            Debug.Assert(Stopped == false);
+            Task.Run(() => ResizerTask(token));
+        }
+
+        public bool IsSizeBeyondLimit => TotalSizeBytes > highTargetSize;
 
         /// <summary>Callback on allocator completion</summary>
         public void OnCompleted() { }
@@ -84,7 +143,7 @@ namespace Tsavorite.core
                 Debug.Assert(key != null);
                 Debug.Assert(value != null);
 
-                size += logSizeCalculator.CalculateRecordSize(info, key, value);
+                size += LogSizeCalculator.CalculateRecordSize(info, key, value);
             }
 
             if (size == 0) return;
@@ -103,14 +162,20 @@ namespace Tsavorite.core
         /// Performs resizing by waiting for an event that is signaled whenever memory utilization changes.
         /// This is invoked on the threadpool to avoid blocking calling threads during the resize operation.
         /// </summary>
-        async Task ResizerTask()
+        async Task ResizerTask(CancellationToken token)
         {
             while (true)
             {
                 try
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(resizeTaskDelaySeconds));
-                    ResizeIfNeeded();
+                    await Task.Delay(TimeSpan.FromSeconds(resizeTaskDelaySeconds), token);
+                    ResizeIfNeeded(token);
+                }
+                catch (OperationCanceledException)
+                {
+                    logger?.LogTrace("Log resize task has been cancelled.");
+                    Stopped = true;
+                    return;
                 }
                 catch (Exception e)
                 {
@@ -124,14 +189,17 @@ namespace Tsavorite.core
         /// It does so by adjusting the number of empty pages in the underlying log. Also, it does this by
         /// incrementing/decrementing the empty page count by 1 at a time to avoid large jumps in memory utilization.
         /// </summary>
-        private void ResizeIfNeeded()
+        private void ResizeIfNeeded(CancellationToken token)
         {
             // Include memory size from the log (logAccessor.MemorySizeBytes) + heap size (logSize.Total) to check utilization
             if (logSize.Total + logAccessor.MemorySizeBytes > highTargetSize)
             {
                 logger?.LogDebug($"Heap size {logSize.Total} + log {logAccessor.MemorySizeBytes} > target {highTargetSize}. Alloc: {logAccessor.AllocatedPageCount} EPC: {logAccessor.EmptyPageCount}");
-                while (logSize.Total + logAccessor.MemorySizeBytes > highTargetSize && logAccessor.EmptyPageCount < logAccessor.MaxEmptyPageCount)
+                while (logSize.Total + logAccessor.MemorySizeBytes > highTargetSize &&
+                    logAccessor.EmptyPageCount < logAccessor.MaxEmptyPageCount)
                 {
+                    token.ThrowIfCancellationRequested();
+
                     if (logAccessor.AllocatedPageCount > logAccessor.BufferSize - logAccessor.EmptyPageCount + 1)
                     {
                         return; // wait for allocation to stabilize
@@ -145,8 +213,11 @@ namespace Tsavorite.core
             else if (logSize.Total + logAccessor.MemorySizeBytes < lowTargetSize)
             {
                 logger?.LogDebug($"Heap size {logSize.Total} + log {logAccessor.MemorySizeBytes} < target {lowTargetSize}. Alloc: {logAccessor.AllocatedPageCount} EPC: {logAccessor.EmptyPageCount}");
-                while (logSize.Total + logAccessor.MemorySizeBytes < lowTargetSize && logAccessor.EmptyPageCount > logAccessor.MinEmptyPageCount)
+                while (logSize.Total + logAccessor.MemorySizeBytes < lowTargetSize &&
+                    logAccessor.EmptyPageCount > logAccessor.MinEmptyPageCount)
                 {
+                    token.ThrowIfCancellationRequested();
+
                     if (logAccessor.AllocatedPageCount < logAccessor.BufferSize - logAccessor.EmptyPageCount - 1)
                     {
                         return; // wait for allocation to stabilize

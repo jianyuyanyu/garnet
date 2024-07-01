@@ -185,6 +185,24 @@ namespace Garnet.server
         /// <param name="output"></param>
         /// <returns></returns>
         GarnetStatus Increment(ArgSlice key, ArgSlice input, ref ArgSlice output);
+
+        /// <summary>
+        /// Increment (INCR, INCRBY)
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="output"></param>
+        /// <param name="incrementCount"></param>
+        /// <returns></returns>
+        GarnetStatus Increment(ArgSlice key, out long output, long incrementCount = 1);
+
+        /// <summary>
+        /// Decrement (DECR, DECRBY)
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="output"></param>
+        /// <param name="decrementCount"></param>
+        /// <returns></returns>
+        GarnetStatus Decrement(ArgSlice key, out long output, long decrementCount = 1);
         #endregion
 
         #region DELETE
@@ -251,7 +269,7 @@ namespace Garnet.server
         /// </summary>
         /// <param name="key">Name of the key or object to get the memory usage</param>
         /// <param name="memoryUsage">The value in bytes the key or object is using</param>
-        /// <param name="samples">Number of sampled nested values</param> 
+        /// <param name="samples">Number of sampled nested values</param>
         /// <returns>GarnetStatus</returns>
         GarnetStatus MemoryUsageForKey(ArgSlice key, out long memoryUsage, int samples = 0);
 
@@ -335,7 +353,7 @@ namespace Garnet.server
         GarnetStatus SortedSetRemoveRangeByLex(byte[] key, ArgSlice input, out ObjectOutputHeader output);
 
         /// <summary>
-        /// Removes and returns the first element from the sorted set stored at key, 
+        /// Removes and returns the first element from the sorted set stored at key,
         /// with the scores ordered from low to high (min) or high to low (max).
         /// </summary>
         /// <param name="key"></param>
@@ -355,7 +373,7 @@ namespace Garnet.server
         GarnetStatus SortedSetPop(ArgSlice key, out (ArgSlice score, ArgSlice member)[] pairs, int count = 1, bool lowScoresFirst = true);
 
         /// <summary>
-        /// Increments the score of member in the sorted set stored at key by increment. 
+        /// Increments the score of member in the sorted set stored at key by increment.
         /// If member does not exist in the sorted set, it is added with increment as its score (as if its previous score was 0.0).
         /// </summary>
         /// <param name="key"></param>
@@ -442,7 +460,7 @@ namespace Garnet.server
 
         /// <summary>
         ///  Adds the specified members to the set at key.
-        ///  Specified members that are already a member of this set are ignored. 
+        ///  Specified members that are already a member of this set are ignored.
         ///  If key does not exist, a new set is created.
         /// </summary>
         /// <param name="key"></param>
@@ -453,7 +471,7 @@ namespace Garnet.server
 
         /// <summary>
         ///  Adds the specified members to the set at key.
-        ///  Specified members that are already a member of this set are ignored. 
+        ///  Specified members that are already a member of this set are ignored.
         ///  If key does not exist, a new set is created.
         /// </summary>
         /// <param name="key"></param>
@@ -464,7 +482,7 @@ namespace Garnet.server
 
         /// <summary>
         /// Removes the specified member from the set.
-        /// Specified members that are not a member of this set are ignored. 
+        /// Specified members that are not a member of this set are ignored.
         /// If key does not exist, this command returns 0.
         /// </summary>
         /// <param name="key"></param>
@@ -475,7 +493,7 @@ namespace Garnet.server
 
         /// <summary>
         /// Removes the specified members from the set.
-        /// Specified members that are not a member of this set are ignored. 
+        /// Specified members that are not a member of this set are ignored.
         /// If key does not exist, this command returns 0.
         /// </summary>
         /// <param name="key"></param>
@@ -486,7 +504,7 @@ namespace Garnet.server
 
         /// <summary>
         /// Removes the specified members from the set.
-        /// Specified members that are not a member of this set are ignored. 
+        /// Specified members that are not a member of this set are ignored.
         /// If key does not exist, this command returns 0.
         /// </summary>
         /// <param name="key"></param>
@@ -521,6 +539,60 @@ namespace Garnet.server
         /// <returns></returns>
         GarnetStatus SetPop(byte[] key, ArgSlice input, ref GarnetObjectStoreOutput outputFooter);
 
+        /// <summary>
+        /// Moves a member from a source set to a destination set.
+        /// If the move was performed, this command returns 1.
+        /// If the member was not found in the source set, or if no operation was performed, this command returns 0.
+        /// </summary>
+        /// <param name="sourceKey"></param>
+        /// <param name="destinationKey"></param>
+        /// <param name="member"></param>
+        /// <param name="smoveResult"></param>
+        /// <returns></returns>
+        GarnetStatus SetMove(ArgSlice sourceKey, ArgSlice destinationKey, ArgSlice member, out int smoveResult);
+
+        /// <summary>
+        /// When called with just the key argument, return a random element from the set value stored at key.
+        /// If the provided count argument is positive, return an array of distinct elements. 
+        /// The array's length is either count or the set's cardinality (SCARD), whichever is lower.
+        /// If called with a negative count, the behavior changes and the command is allowed to return the same element multiple times. 
+        /// In this case, the number of returned elements is the absolute value of the specified count.
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="input"></param>
+        /// <param name="outputFooter"></param>
+        /// <returns></returns>
+        GarnetStatus SetRandomMember(byte[] key, ArgSlice input, ref GarnetObjectStoreOutput outputFooter);
+
+        /// <summary>
+        /// This command is equal to SUNION, but instead of returning the resulting set, it is stored in destination.
+        /// If destination already exists, it is overwritten.
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="keys"></param>
+        /// <param name="count"></param>
+        /// <returns></returns>
+        GarnetStatus SetUnionStore(byte[] key, ArgSlice[] keys, out int count);
+
+        /// <summary>
+        /// This command is equal to SINTER, but instead of returning the resulting set, it is stored in destination.
+        /// If destination already exists, it is overwritten.
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="keys"></param>
+        /// <param name="count"></param>
+        /// <returns></returns>
+        GarnetStatus SetIntersectStore(byte[] key, ArgSlice[] keys, out int count);
+
+        /// <summary>
+        /// This command is equal to SDIFF, but instead of returning the resulting set, it is stored in destination.
+        /// If destination already exists, it is overwritten.
+        /// </summary>
+        /// <param name="key">destination</param>
+        /// <param name="keys"></param>
+        /// <param name="count"></param>
+        /// <returns></returns>
+        public GarnetStatus SetDiffStore(byte[] key, ArgSlice[] keys, out int count);
         #endregion
 
         #region List Methods
@@ -640,6 +712,7 @@ namespace Garnet.server
         /// <param name="count"></param>
         /// <returns></returns>
         GarnetStatus ListRightPop(ArgSlice key, int count, out ArgSlice[] elements);
+
         #endregion
 
         /// <summary>
@@ -651,8 +724,8 @@ namespace Garnet.server
         /// <param name="sourceDirection"></param>
         /// <param name="destinationDirection"></param>
         /// <param name="element">The element being popped and pushed</param>
-        /// <returns>true when success</returns>
-        public bool ListMove(ArgSlice sourceKey, ArgSlice destinationKey, OperationDirection sourceDirection, OperationDirection destinationDirection, out byte[] element);
+        /// <returns>GarnetStatus</returns>
+        public GarnetStatus ListMove(ArgSlice sourceKey, ArgSlice destinationKey, OperationDirection sourceDirection, OperationDirection destinationDirection, out byte[] element);
 
         /// <summary>
         /// Trim an existing list so it only contains the specified range of elements.
@@ -688,6 +761,15 @@ namespace Garnet.server
         /// <param name="output"></param>
         /// <returns></returns>
         GarnetStatus ListRemove(byte[] key, ArgSlice input, out ObjectOutputHeader output);
+
+        /// <summary>
+        /// Sets the list element at index to element.
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="input"></param>
+        /// <param name="output"></param>
+        /// <returns></returns>
+        GarnetStatus ListSet(byte[] key, ArgSlice input, ref GarnetObjectStoreOutput output);
 
         #endregion
 
@@ -726,7 +808,7 @@ namespace Garnet.server
         GarnetStatus HashSet(byte[] key, ArgSlice input, out ObjectOutputHeader output);
 
         /// <summary>
-        /// Set only if field does not yet exist. If key does not exist, a new key holding a hash is created. 
+        /// Set only if field does not yet exist. If key does not exist, a new key holding a hash is created.
         /// If field already exists, no action is performed.
         /// HashSet only when field does not exist
         /// </summary>
@@ -788,7 +870,7 @@ namespace Garnet.server
         #region BitMaps Methods
 
         /// <summary>
-        /// 
+        ///
         /// </summary>
         /// <param name="key"></param>
         /// <param name="offset"></param>
@@ -815,10 +897,10 @@ namespace Garnet.server
         /// <param name="bitop"></param>
         /// <param name="result"></param>
         /// <returns></returns>
-        GarnetStatus StringBitOperation(ArgSlice[] keys, BitmapOperation bitop, out long result);
+        GarnetStatus StringBitOperation(Span<ArgSlice> keys, BitmapOperation bitop, out long result);
 
         /// <summary>
-        /// Perform a bitwise operation between multiple keys 
+        /// Perform a bitwise operation between multiple keys
         /// and store the result in the destination key.
         /// </summary>
         /// <param name="bitop"></param>
@@ -865,13 +947,13 @@ namespace Garnet.server
         GarnetStatus HyperLogLogAdd(ArgSlice keys, string[] elements, out bool updated);
 
         /// <summary>
-        /// Merge multiple HyperLogLog values into a unique value that will approximate the cardinality 
+        /// Merge multiple HyperLogLog values into a unique value that will approximate the cardinality
         /// of the union of the observed Sets of the source HyperLogLog structures.
         /// </summary>
         /// <param name="keys"></param>
         /// <param name="error"></param>
         /// <returns></returns>
-        GarnetStatus HyperLogLogMerge(ArgSlice[] keys, out bool error);
+        GarnetStatus HyperLogLogMerge(Span<ArgSlice> keys, out bool error);
 
         #endregion
     }
@@ -987,6 +1069,16 @@ namespace Garnet.server
         GarnetStatus SortedSetScore(byte[] key, ArgSlice input, ref GarnetObjectStoreOutput outputFooter);
 
         /// <summary>
+        /// Returns the scores associated with the specified members in the sorted set stored at key.
+        /// For every member that does not exist in the sorted set, a nil value is returned.
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="input"></param>
+        /// <param name="outputFooter"></param>
+        /// <returns></returns>
+        GarnetStatus SortedSetScores(byte[] key, ArgSlice input, ref GarnetObjectStoreOutput outputFooter);
+
+        /// <summary>
         /// Returns the number of elements in the sorted set at key with a score between min and max.
         /// </summary>
         /// <param name="key"></param>
@@ -997,7 +1089,7 @@ namespace Garnet.server
 
         /// <summary>
         /// Returns the number of elements in the sorted set with a value between min and max.
-        /// When all the elements in a sorted set have the same score, 
+        /// When all the elements in a sorted set have the same score,
         /// this command forces lexicographical ordering.
         /// </summary>
         /// <param name="key"></param>
@@ -1012,9 +1104,20 @@ namespace Garnet.server
         /// </summary>
         /// <param name="key"></param>
         /// <param name="input"></param>
-        /// <param name="output"></param>
+        /// <param name="outputFooter"></param>
         /// <returns></returns>
-        GarnetStatus SortedSetRank(byte[] key, ArgSlice input, out ObjectOutputHeader output);
+        GarnetStatus SortedSetRank(byte[] key, ArgSlice input, ref GarnetObjectStoreOutput outputFooter);
+
+        /// <summary>
+        /// ZRANK: Returns the rank of member in the sorted set, the scores in the sorted set are ordered from low to high
+        /// ZREVRANK: Returns the rank of member in the sorted set, with the scores ordered from high to low
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="member"></param>
+        /// <param name="reverse"></param>
+        /// <param name="rank"></param>
+        /// <returns></returns>
+        GarnetStatus SortedSetRank(ArgSlice key, ArgSlice member, bool reverse, out long? rank);
 
         /// <summary>
         /// Returns a random element from the sorted set key.
@@ -1156,6 +1259,15 @@ namespace Garnet.server
         GarnetStatus SetMembers(byte[] key, ArgSlice input, ref GarnetObjectStoreOutput outputFooter);
 
         /// <summary>
+        /// Returns if member is a member of the set stored at key.
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="input"></param>
+        /// <param name="outputFooter"></param>
+        /// <returns></returns>
+        GarnetStatus SetIsMember(byte[] key, ArgSlice input, ref GarnetObjectStoreOutput outputFooter);
+
+        /// <summary>
         /// Iterates over the members of the Set with the given key using a cursor,
         /// a match pattern and count parameters.
         /// </summary>
@@ -1167,6 +1279,31 @@ namespace Garnet.server
         /// <returns></returns>
         GarnetStatus SetScan(ArgSlice key, long cursor, string match, int count, out ArgSlice[] items);
 
+        /// <summary>
+        /// Returns the members of the set resulting from the union of all the given sets.
+        /// Keys that do not exist are considered to be empty sets.
+        /// </summary>
+        /// <param name="keys"></param>
+        /// <param name="output"></param>
+        /// <returns></returns>
+        GarnetStatus SetUnion(ArgSlice[] keys, out HashSet<byte[]> output);
+
+        /// <summary>
+        /// Returns the members of the set resulting from the intersection of all the given sets.
+        /// Keys that do not exist are considered to be empty sets.
+        /// </summary>
+        /// <param name="keys"></param>
+        /// <param name="output"></param>
+        /// <returns></returns>
+        GarnetStatus SetIntersect(ArgSlice[] keys, out HashSet<byte[]> output);
+
+        /// <summary>
+        /// Returns the members of the set resulting from the difference between the first set and all the successive sets.
+        /// </summary>
+        /// <param name="keys"></param>
+        /// <param name="members"></param>
+        /// <returns></returns>
+        GarnetStatus SetDiff(ArgSlice[] keys, out HashSet<byte[]> members);
         #endregion
 
         #region Hash Methods
@@ -1187,19 +1324,34 @@ namespace Garnet.server
         /// <param name="fields"></param>
         /// <param name="values"></param>
         /// <returns></returns>
-        GarnetStatus HashGet(ArgSlice key, ArgSlice[] fields, out ArgSlice[] values);
+        GarnetStatus HashGetMultiple(ArgSlice key, ArgSlice[] fields, out ArgSlice[] values);
 
         /// <summary>
-        /// HashGet: Returns the value associated with field in the hash stored at key.
-        /// HashGetAll: Returns all fields and values of the hash stored at key.
-        /// HashGetMultiple: Returns the values associated with the specified fields in the hash stored at key.
-        /// HashRandomField: Returns a random field from the hash value stored at key.
+        /// Returns the value associated with field in the hash stored at key.
         /// </summary>
         /// <param name="key"></param>
         /// <param name="input">The metadata input for the operation</param>
         /// <param name="outputFooter"></param>
         /// <returns></returns>
         GarnetStatus HashGet(byte[] key, ArgSlice input, ref GarnetObjectStoreOutput outputFooter);
+
+        /// <summary>
+        /// Returns all fields and values of the hash stored at key.
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="input">The metadata input for the operation</param>
+        /// <param name="outputFooter"></param>
+        /// <returns></returns>
+        GarnetStatus HashGetAll(byte[] key, ArgSlice input, ref GarnetObjectStoreOutput outputFooter);
+
+        /// <summary>
+        /// Returns the values associated with the specified fields in the hash stored at key.
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="input">The metadata input for the operation</param>
+        /// <param name="outputFooter"></param>
+        /// <returns></returns>
+        GarnetStatus HashGetMultiple(byte[] key, ArgSlice input, ref GarnetObjectStoreOutput outputFooter);
 
         /// <summary>
         /// Returns ALL the values in the hash stored at key.
@@ -1216,6 +1368,15 @@ namespace Garnet.server
         /// <param name="count"></param>
         /// <returns></returns>
         GarnetStatus HashLength(ArgSlice key, out int count);
+
+        /// <summary>
+        ///Returns the string length of the value associated with field in the hash stored at key. If the key or the field do not exist, 0 is returned.
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="input"></param>
+        /// <param name="output"></param>
+        /// <returns></returns>
+        GarnetStatus HashStrLength(byte[] key, ArgSlice input, out ObjectOutputHeader output);
 
         /// <summary>
         /// Returns the number of fields contained in the hash Key.
@@ -1324,7 +1485,7 @@ namespace Garnet.server
         GarnetStatus StringGetBit(ArgSlice key, ArgSlice offset, out bool bValue);
 
         /// <summary>
-        /// Count the number of set bits in a string. 
+        /// Count the number of set bits in a string.
         /// It can be specified an interval for counting, passing the start and end arguments.
         /// </summary>
         /// <param name="key"></param>
@@ -1334,7 +1495,7 @@ namespace Garnet.server
         GarnetStatus StringBitCount(ref SpanByte key, ref SpanByte input, ref SpanByteAndMemory output);
 
         /// <summary>
-        /// Count the number of set bits in a string. 
+        /// Count the number of set bits in a string.
         /// It can be specified an interval for counting, passing the start and end arguments.
         /// </summary>
         /// <param name="key"></param>
@@ -1376,15 +1537,15 @@ namespace Garnet.server
         /// <param name="count"></param>
         /// <param name="error"></param>
         /// <returns></returns>
-        GarnetStatus HyperLogLogLength(ArgSlice[] keys, ref SpanByte input, out long count, out bool error);
+        GarnetStatus HyperLogLogLength(Span<ArgSlice> keys, ref SpanByte input, out long count, out bool error);
 
         /// <summary>
-        /// 
+        ///
         /// </summary>
         /// <param name="keys"></param>
         /// <param name="count"></param>
         /// <returns></returns>
-        GarnetStatus HyperLogLogLength(ArgSlice[] keys, out long count);
+        GarnetStatus HyperLogLogLength(Span<ArgSlice> keys, out long count);
         #endregion
 
         #region Server Methods
@@ -1413,7 +1574,7 @@ namespace Garnet.server
         /// <param name="count">The size of the batch of keys</param>
         /// <param name="type">Type of key to filter out</param>
         /// <returns></returns>
-        public bool DbScan(ArgSlice patternB, bool allKeys, long cursor, out long storeCursor, out List<byte[]> Keys, long count = 10, Span<byte> type = default);
+        public bool DbScan(ArgSlice patternB, bool allKeys, long cursor, out long storeCursor, out List<byte[]> Keys, long count = 10, ReadOnlySpan<byte> type = default);
 
         /// <summary>
         /// Iterate the contents of the main store

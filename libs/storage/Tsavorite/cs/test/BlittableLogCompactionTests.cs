@@ -3,6 +3,7 @@
 
 using System;
 using System.Diagnostics;
+using System.IO;
 using NUnit.Framework;
 using Tsavorite.core;
 using static Tsavorite.test.TestUtils;
@@ -37,17 +38,11 @@ namespace Tsavorite.test
         public void Setup()
         {
             DeleteDirectory(MethodTestDir, wait: true);
-            log = Devices.CreateLogDevice(MethodTestDir + "/BlittableLogCompactionTests.log", deleteOnClose: true);
+            log = Devices.CreateLogDevice(Path.Join(MethodTestDir, "BlittableLogCompactionTests.log"), deleteOnClose: true);
 
-            var concurrencyControlMode = ConcurrencyControlMode.LockTable;
             var hashMod = HashModulo.NoMod;
             foreach (var arg in TestContext.CurrentContext.Test.Arguments)
             {
-                if (arg is ConcurrencyControlMode locking_mode)
-                {
-                    concurrencyControlMode = locking_mode;
-                    continue;
-                }
                 if (arg is HashModulo mod)
                 {
                     hashMod = mod;
@@ -56,7 +51,7 @@ namespace Tsavorite.test
             }
 
             store = new TsavoriteKV<KeyStruct, ValueStruct>
-                (1L << 20, new LogSettings { LogDevice = log, MemorySizeBits = 15, PageSizeBits = 9 }, comparer: new HashModuloComparer(hashMod), concurrencyControlMode: concurrencyControlMode); ;
+                (1L << 20, new LogSettings { LogDevice = log, MemorySizeBits = 15, PageSizeBits = 9 }, comparer: new HashModuloComparer(hashMod)); ;
         }
 
         [TearDown]
@@ -73,10 +68,11 @@ namespace Tsavorite.test
         {
             InputStruct input = default;
             int numPending = 0;
+            var bContext = session.BasicContext;
 
             void drainPending()
             {
-                Assert.IsTrue(session.CompletePendingWithOutputs(out var outputs, wait: true));
+                Assert.IsTrue(bContext.CompletePendingWithOutputs(out var outputs, wait: true));
                 using (outputs)
                 {
                     for (; outputs.Next(); --numPending)
@@ -100,7 +96,7 @@ namespace Tsavorite.test
                 var key1 = new KeyStruct { kfield1 = i, kfield2 = i + 1 };
                 var value = new ValueStruct { vfield1 = i, vfield2 = i + 1 };
 
-                var status = session.Read(ref key1, ref input, ref output, isDeleted(i) ? 1 : 0, 0);
+                var status = bContext.Read(ref key1, ref input, ref output, isDeleted(i) ? 1 : 0);
                 if (!status.IsPending)
                 {
                     if (isDeleted(i))
@@ -125,9 +121,10 @@ namespace Tsavorite.test
         [Category("Compaction")]
         [Category("Smoke")]
 
-        public void BlittableLogCompactionTest1([Values] CompactionType compactionType, [Values(ConcurrencyControlMode.LockTable)] ConcurrencyControlMode concurrencyControlMode)
+        public void BlittableLogCompactionTest1([Values] CompactionType compactionType)
         {
             using var session = store.NewSession<InputStruct, OutputStruct, int, FunctionsCompaction>(new FunctionsCompaction());
+            var bContext = session.BasicContext;
 
             const int totalRecords = 2_000;
             var start = store.Log.TailAddress;
@@ -140,7 +137,7 @@ namespace Tsavorite.test
 
                 var key1 = new KeyStruct { kfield1 = i, kfield2 = i + 1 };
                 var value = new ValueStruct { vfield1 = i, vfield2 = i + 1 };
-                session.Upsert(ref key1, ref value, 0, 0);
+                bContext.Upsert(ref key1, ref value, 0);
             }
 
             store.Log.FlushAndEvict(wait: true);
@@ -156,10 +153,10 @@ namespace Tsavorite.test
         [Test]
         [Category("TsavoriteKV")]
         [Category("Compaction")]
-        public void BlittableLogCompactionTest2([Values] CompactionType compactionType, [Values(ConcurrencyControlMode.LockTable)] ConcurrencyControlMode concurrencyControlMode,
-                                                [Values(HashModulo.NoMod, HashModulo.Hundred)] HashModulo hashMod)
+        public void BlittableLogCompactionTest2([Values] CompactionType compactionType, [Values(HashModulo.NoMod, HashModulo.Hundred)] HashModulo hashMod)
         {
             using var session = store.NewSession<InputStruct, OutputStruct, int, FunctionsCompaction>(new FunctionsCompaction());
+            var bContext = session.BasicContext;
 
             const int totalRecords = 2_000;
             var start = store.Log.TailAddress;
@@ -172,7 +169,7 @@ namespace Tsavorite.test
 
                 var key1 = new KeyStruct { kfield1 = i, kfield2 = i + 1 };
                 var value = new ValueStruct { vfield1 = i, vfield2 = i + 1 };
-                session.Upsert(ref key1, ref value, 0, 0);
+                bContext.Upsert(ref key1, ref value, 0);
             }
 
             store.Log.FlushAndEvict(true);
@@ -190,7 +187,7 @@ namespace Tsavorite.test
             {
                 var key1 = new KeyStruct { kfield1 = i, kfield2 = i + 1 };
                 var value = new ValueStruct { vfield1 = i, vfield2 = i + 1 };
-                session.Upsert(ref key1, ref value, 0, 0);
+                bContext.Upsert(ref key1, ref value, 0);
             }
 
             compactUntil = session.Compact(compactUntil, compactionType);
@@ -204,9 +201,10 @@ namespace Tsavorite.test
         [Test]
         [Category("TsavoriteKV")]
         [Category("Compaction")]
-        public void BlittableLogCompactionTest3([Values] CompactionType compactionType, [Values(ConcurrencyControlMode.LockTable)] ConcurrencyControlMode concurrencyControlMode)
+        public void BlittableLogCompactionTest3([Values] CompactionType compactionType)
         {
             using var session = store.NewSession<InputStruct, OutputStruct, int, FunctionsCompaction>(new FunctionsCompaction());
+            var bContext = session.BasicContext;
 
             const int totalRecords = 2_000;
             var start = store.Log.TailAddress;
@@ -219,13 +217,13 @@ namespace Tsavorite.test
 
                 var key1 = new KeyStruct { kfield1 = i, kfield2 = i + 1 };
                 var value = new ValueStruct { vfield1 = i, vfield2 = i + 1 };
-                session.Upsert(ref key1, ref value, 0, 0);
+                bContext.Upsert(ref key1, ref value, 0);
 
                 if (i % 8 == 0)
                 {
                     int j = i / 4;
                     key1 = new KeyStruct { kfield1 = j, kfield2 = j + 1 };
-                    session.Delete(ref key1, 0, 0);
+                    bContext.Delete(ref key1, 0);
                 }
             }
 
@@ -243,9 +241,10 @@ namespace Tsavorite.test
         [Category("Compaction")]
         [Category("Smoke")]
 
-        public void BlittableLogCompactionCustomFunctionsTest1([Values] CompactionType compactionType, [Values(ConcurrencyControlMode.LockTable)] ConcurrencyControlMode concurrencyControlMode)
+        public void BlittableLogCompactionCustomFunctionsTest1([Values] CompactionType compactionType)
         {
             using var session = store.NewSession<InputStruct, OutputStruct, int, FunctionsCompaction>(new FunctionsCompaction());
+            var bContext = session.BasicContext;
 
             InputStruct input = default;
 
@@ -260,7 +259,7 @@ namespace Tsavorite.test
 
                 var key1 = new KeyStruct { kfield1 = i, kfield2 = i + 1 };
                 var value = new ValueStruct { vfield1 = i, vfield2 = i + 1 };
-                session.Upsert(ref key1, ref value, 0, 0);
+                bContext.Upsert(ref key1, ref value, 0);
             }
 
             var tail = store.Log.TailAddress;
@@ -279,10 +278,10 @@ namespace Tsavorite.test
 
                 var ctx = (i < (totalRecords / 2) && (i % 2 != 0)) ? 1 : 0;
 
-                var status = session.Read(ref key1, ref input, ref output, ctx, 0);
+                var status = bContext.Read(ref key1, ref input, ref output, ctx);
                 if (status.IsPending)
                 {
-                    Assert.IsTrue(session.CompletePendingWithOutputs(out var outputs, wait: true));
+                    Assert.IsTrue(bContext.CompletePendingWithOutputs(out var outputs, wait: true));
                     (status, output) = GetSinglePendingResult(outputs);
                 }
 
@@ -302,29 +301,28 @@ namespace Tsavorite.test
         [Test]
         [Category("TsavoriteKV")]
         [Category("Compaction")]
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060:Remove unused parameter", Justification = "concurrencyControlMode is used by Setup")]
-        public void BlittableLogCompactionCustomFunctionsTest2([Values] CompactionType compactionType, [Values] bool flushAndEvict,
-                                                                [Values(ConcurrencyControlMode.LockTable)] ConcurrencyControlMode concurrencyControlMode)
+        public void BlittableLogCompactionCustomFunctionsTest2([Values] CompactionType compactionType, [Values] bool flushAndEvict)
         {
             // Update: irrelevant as session compaction no longer uses Copy/CopyInPlace
             // This test checks if CopyInPlace returning false triggers call to Copy
 
             using var session = store.NewSession<InputStruct, OutputStruct, int, FunctionsCompaction>(new FunctionsCompaction());
+            var bContext = session.BasicContext;
 
             var key = new KeyStruct { kfield1 = 100, kfield2 = 101 };
             var value = new ValueStruct { vfield1 = 10, vfield2 = 20 };
             var input = default(InputStruct);
             var output = default(OutputStruct);
 
-            session.Upsert(ref key, ref value, 0, 0);
-            var status = session.Read(ref key, ref input, ref output, 0, 0);
+            bContext.Upsert(ref key, ref value, 0);
+            var status = bContext.Read(ref key, ref input, ref output, 0);
             Debug.Assert(status.Found);
 
             store.Log.Flush(true);
 
             value = new ValueStruct { vfield1 = 11, vfield2 = 21 };
-            session.Upsert(ref key, ref value, 0, 0);
-            status = session.Read(ref key, ref input, ref output, 0, 0);
+            bContext.Upsert(ref key, ref value, 0);
+            status = bContext.Read(ref key, ref input, ref output, 0);
             Debug.Assert(status.Found);
 
             if (flushAndEvict)
@@ -335,10 +333,10 @@ namespace Tsavorite.test
             var compactUntil = session.Compact(store.Log.TailAddress, compactionType);
             store.Log.Truncate();
 
-            status = session.Read(ref key, ref input, ref output, 0, 0);
+            status = bContext.Read(ref key, ref input, ref output, 0);
             if (status.IsPending)
             {
-                Assert.IsTrue(session.CompletePendingWithOutputs(out var outputs, wait: true));
+                Assert.IsTrue(bContext.CompletePendingWithOutputs(out var outputs, wait: true));
                 (status, output) = GetSinglePendingResult(outputs);
             }
 

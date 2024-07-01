@@ -13,7 +13,7 @@ namespace Tsavorite.core
         internal RevivificationStats stats = new();
 
         internal readonly bool IsEnabled = false;
-        internal readonly int FixedValueLength => Unsafe.SizeOf<Value>();
+        internal static int FixedValueLength => Unsafe.SizeOf<Value>();
         internal bool restoreDeletedRecordsIfBinIsFull;
         internal bool useFreeRecordPoolForCTT;
 
@@ -30,8 +30,6 @@ namespace Tsavorite.core
 
             if (revivSettings is null)
                 return;
-            if (revivSettings.EnableRevivification && !store.IsLocking)
-                throw new TsavoriteException("Revivification requires ConcurrencyControlMode of LockTable or RecordIsolation");
 
             revivSettings.Verify(IsFixedLength, logSettings.MutableFraction);
             if (!revivSettings.EnableRevivification)

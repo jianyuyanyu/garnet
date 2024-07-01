@@ -16,7 +16,7 @@ namespace Garnet.server
     public abstract class GarnetObjectBase : IGarnetObject
     {
         int serializationState;
-        byte[] serialized;
+        public byte[] serialized;
 
         /// <inheritdoc />
         public abstract byte Type { get; }
@@ -47,6 +47,7 @@ namespace Garnet.server
                 if (serializationState == (int)SerializationPhase.REST && MakeTransition(SerializationPhase.REST, SerializationPhase.SERIALIZING))
                 {
                     // Directly serialize to wire, do not cache serialized state
+                    writer.Write(Type);
                     DoSerialize(writer);
                     serializationState = (int)SerializationPhase.REST;
                     return;
@@ -54,9 +55,18 @@ namespace Garnet.server
 
                 if (serializationState == (int)SerializationPhase.SERIALIZED)
                 {
-                    // Serialized state is cached, use that
-                    Debug.Assert(serialized != null);
-                    writer.Write(serialized);
+                    // If serialized state is cached, use that
+                    var _serialized = serialized;
+                    if (_serialized != null)
+                    {
+                        writer.Write(Type);
+                        writer.Write(_serialized);
+                    }
+                    else
+                    {
+                        // Write null object to stream
+                        writer.Write((byte)GarnetObjectType.Null);
+                    }
                     return;
                 }
 
@@ -65,21 +75,29 @@ namespace Garnet.server
         }
 
         /// <inheritdoc />
-        public void CopyUpdate(ref IGarnetObject newValue)
+        public void CopyUpdate(ref IGarnetObject oldValue, ref IGarnetObject newValue, bool isInNewVersion)
         {
             newValue = Clone();
             newValue.Expiration = Expiration;
 
+            // If we are not currently taking a checkpoint, we can delete the old version
+            // since the new version of the object is already created.
+            if (!isInNewVersion)
+            {
+                oldValue = null;
+                return;
+            }
+
+            // Create a serialized version for checkpoint version (v)
             while (true)
             {
                 if (serializationState == (int)SerializationPhase.REST && MakeTransition(SerializationPhase.REST, SerializationPhase.SERIALIZING))
                 {
-                    using (var ms = new MemoryStream())
-                    {
-                        using var writer = new BinaryWriter(ms, new UTF8Encoding(), true);
-                        DoSerialize(writer);
-                        serialized = ms.ToArray();
-                    }
+                    using var ms = new MemoryStream();
+                    using var writer = new BinaryWriter(ms, Encoding.UTF8);
+                    DoSerialize(writer);
+                    serialized = ms.ToArray();
+
                     serializationState = (int)SerializationPhase.SERIALIZED;
                     return;
                 }
@@ -98,7 +116,7 @@ namespace Garnet.server
         public abstract GarnetObjectBase Clone();
 
         /// <inheritdoc />
-        public abstract bool Operate(ref SpanByte input, ref SpanByteAndMemory output, out long sizeChange);
+        public abstract bool Operate(ref SpanByte input, ref SpanByteAndMemory output, out long sizeChange, out bool removeKey);
 
         /// <inheritdoc />
         public abstract void Dispose();

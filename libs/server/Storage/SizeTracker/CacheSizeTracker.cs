@@ -4,6 +4,7 @@
 using System;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Threading;
 using Microsoft.Extensions.Logging;
 using Tsavorite.core;
 
@@ -24,6 +25,8 @@ namespace Garnet.server
         private TsavoriteKV<byte[], IGarnetObject> store;
 
         internal long IndexSizeBytes => store.IndexSize * 64 + store.OverflowBucketCount * 64;
+
+        internal bool Stopped => mainLogTracker.Stopped && (readCacheTracker == null || readCacheTracker.Stopped);
 
         /// <summary>Helps calculate size of a record including heap memory in Object store.</summary>
         internal struct LogSizeCalculator : ILogSizeCalculator<byte[], IGarnetObject>
@@ -46,7 +49,7 @@ namespace Garnet.server
         }
 
         /// <summary>Class to track and update cache size</summary>
-        /// <param name="store">FASTER store instance</param>
+        /// <param name="store">Tsavorite store instance</param>
         /// <param name="logSettings">Hybrid log settings</param>
         /// <param name="targetSize">Total memory size target</param>
         /// <param name="loggerFactory"></param>
@@ -64,6 +67,8 @@ namespace Garnet.server
             this.mainLogTracker = new LogSizeTracker<byte[], IGarnetObject, LogSizeCalculator>(store.Log, logSizeCalculator,
                 mainLogTargetSizeBytes, mainLogTargetSizeBytes / deltaFraction, loggerFactory?.CreateLogger("ObjSizeTracker"));
             store.Log.SubscribeEvictions(mainLogTracker);
+            store.Log.SubscribeDeserializations(new LogOperationObserver<byte[], IGarnetObject, LogSizeCalculator>(mainLogTracker, LogOperationType.Deserialize));
+            store.Log.IsSizeBeyondLimit = () => mainLogTracker.IsSizeBeyondLimit;
 
             if (store.ReadCache != null)
             {
@@ -71,6 +76,12 @@ namespace Garnet.server
                     readCacheTargetSizeBytes, readCacheTargetSizeBytes / deltaFraction, loggerFactory?.CreateLogger("ObjReadCacheSizeTracker"));
                 store.ReadCache.SubscribeEvictions(readCacheTracker);
             }
+        }
+
+        public void Start(CancellationToken token)
+        {
+            mainLogTracker.Start(token);
+            readCacheTracker?.Start(token);
         }
 
         /// <summary>

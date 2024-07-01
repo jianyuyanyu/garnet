@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using NUnit.Framework;
@@ -26,22 +27,19 @@ namespace Tsavorite.test
             {
                 checkpointManager = new DeviceLogCommitCheckpointManager(
                     new LocalStorageNamedDeviceFactory(),
-                    new DefaultCheckpointNamingScheme(TestUtils.MethodTestDir +
-                                                      "/checkpoints/"), false); // PurgeAll deletes this directory
+                    new DefaultCheckpointNamingScheme(Path.Join(TestUtils.MethodTestDir, "checkpoints")), false); // PurgeAll deletes this directory
             }
             else
             {
                 TestUtils.IgnoreIfNotRunningAzureTests();
                 checkpointManager = new DeviceLogCommitCheckpointManager(
                     new AzureStorageNamedDeviceFactory(TestUtils.AzureEmulatedStorageString),
-                    new DefaultCheckpointNamingScheme(
-                        $"{TestUtils.AzureTestContainer}/{TestUtils.AzureTestDirectory}"), false);
+                    new AzureCheckpointNamingScheme($"{TestUtils.AzureTestContainer}/{TestUtils.AzureTestDirectory}"), false);
             }
 
-            var path = TestUtils.MethodTestDir + "/";
-            using (var log = Devices.CreateLogDevice(path + "hlog.log", deleteOnClose: true))
+            using (var log = Devices.CreateLogDevice(Path.Join(TestUtils.MethodTestDir, "hlog.log"), deleteOnClose: true))
             {
-                TestUtils.RecreateDirectory(path);
+                TestUtils.RecreateDirectory(TestUtils.MethodTestDir);
 
                 using var store = new TsavoriteKV<long, long>
                 (1 << 10,
@@ -55,7 +53,8 @@ namespace Tsavorite.test
                     },
                     checkpointSettings: new CheckpointSettings { CheckpointManager = checkpointManager }
                 );
-                using var s = store.NewSession<long, long, Empty, SimpleFunctions<long, long>>(new SimpleFunctions<long, long>());
+                using var s = store.NewSession<long, long, Empty, SimpleSimpleFunctions<long, long>>(new SimpleSimpleFunctions<long, long>());
+                var bContext = s.BasicContext;
 
                 var logCheckpoints = new Dictionary<Guid, int>();
                 var indexCheckpoints = new Dictionary<Guid, int>();
@@ -64,7 +63,7 @@ namespace Tsavorite.test
                 for (var i = 0; i < 10; i++)
                 {
                     // Do some dummy update
-                    s.Upsert(0, random.Next());
+                    bContext.Upsert(0, random.Next());
 
                     var checkpointType = random.Next(5);
                     Guid result = default;
@@ -142,7 +141,7 @@ namespace Tsavorite.test
                 Assert.IsEmpty(checkpointManager.GetIndexCheckpointTokens());
             }
             checkpointManager.Dispose();
-            TestUtils.DeleteDirectory(path, wait: true);
+            TestUtils.DeleteDirectory(TestUtils.MethodTestDir, wait: true);
         }
     }
 }

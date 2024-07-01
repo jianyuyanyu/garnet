@@ -192,6 +192,18 @@ Sets field in the hash stored at **key** to value, only if field does not yet ex
 
 ---
 
+### HSTRLEN
+
+#### Syntax
+
+```bash
+    HSTRLEN key field
+```
+
+Returns the string length of the value associated with **field** in the hash stored at **key**. If the **key** or the **field** do not exist, 0 is returned.
+
+---
+
 ### HVALS
 
 #### Syntax
@@ -205,6 +217,42 @@ Returns all values in the hash stored at **key**.
 ---
 
 ## List
+
+### BLMOVE
+
+#### Syntax
+
+```bash 
+    BLMOVE source destination <LEFT | RIGHT> <LEFT | RIGHT> timeout
+```
+
+BLMOVE is the blocking variant of [LMOVE](#lmove-lmove). When source contains elements, this command behaves exactly like LMOVE. When used inside a MULTI/EXEC block, this command behaves exactly like LMOVE. When source is empty, Garnet will block the connection until another client pushes to it or until timeout (a double value specifying the maximum number of seconds to block) is reached. A timeout of zero can be used to block indefinitely.
+
+---
+
+### BLPOP
+
+#### Syntax
+
+```bash 
+    BLPOP key [key ...] timeout
+```
+
+BLPOP is a blocking list pop primitive. It is the blocking version of [LPOP](#lpop) because it blocks the connection when there are no elements to pop from any of the given lists. An element is popped from the head of the first list that is non-empty, with the given keys being checked in the order that they are given.
+
+---
+
+### BRPOP
+
+#### Syntax
+
+```bash 
+    BRPOP key [key ...] timeout
+```
+
+BRPOP is a blocking list pop primitive. It is the blocking version of [RPOP](#rpop) because it blocks the connection when there are no elements to pop from any of the given lists. An element is popped from the tail of the first list that is non-empty, with the given keys being checked in the order that they are given.
+
+---
 
 ### LINDEX
 
@@ -325,6 +373,20 @@ Removes the first count occurrences of elements equal to element from the list s
 
 ---
 
+### LSET
+
+#### Syntax
+
+```bash
+    LSET key index element
+```
+
+Sets the list element at **index** to **element**. For more information on the index argument, see [LINDEX](#lindex).
+
+An error is returned for out of range indexes.
+
+---
+
 ### LTRIM
 
 #### Syntax
@@ -440,6 +502,35 @@ Removes and returns one or more random members from the set value stored at **ke
 
 ---
 
+### SISMEMBER
+
+#### Syntax
+
+```bash
+    SISMEMBER key member
+```
+
+Returns if **member** is a member of the set stored at **key**.
+
+---
+
+### SRANDMEMBER
+
+#### Syntax
+
+```bash
+    SRANDMEMBER key [count]
+```
+
+When called with just the **key** argument, return a random element from the set value stored at **key**.
+
+If the provided **count** argument is positive, return an array of **distinct elements**. The array's length is either **count** or the set's cardinality (SCARD), whichever is lower.
+
+If called with a negative **count**, the behavior changes and the command is allowed to return the **same element multiple times**. In this case, the number of returned elements is the absolute value of the specified **count**.
+
+---
+
+
 ### SREM
 
 #### Syntax
@@ -454,7 +545,7 @@ If **key** does not exist, it is treated as an empty set and this command return
 
 ---
 
-### SSCAN {#sscan}
+### SSCAN
 
 #### Syntax
 
@@ -465,6 +556,88 @@ If **key** does not exist, it is treated as an empty set and this command return
 Iterates elements of Sets types. Same as [HSCAN](#hscan) and [ZSCAN](#zscan) commands, SSCAN is used in order to incrementally iterate over the elements of the set stored at **key**.
 
 The **match** parameter allows to apply a filter to elements after they have been retrieved from the collection. The **count** option sets a limit to the maximum number of items returned from the server to this command. This limit is also set in conjunction with the object-scan-count-limit of the global server settings.
+
+---
+
+### SUNION
+
+#### Syntax
+
+```bash
+    SUNION key [key ...]
+```
+
+Returns the members of the set resulting from the union of all the given sets.
+Keys that do not exist are considered to be empty sets.
+
+---
+
+### SUNIONSTORE
+
+#### Syntax
+
+```bash
+    SUNIONSTORE destination key [key ...]
+```
+
+This command is equal to [SUNION](#SUNION), but instead of returning the resulting set, it is stored in **destination**.
+
+If **destination** already exists, it is overwritten.
+
+---
+
+### SINTER
+
+#### Syntax
+
+```bash
+    SINTER key [key ...]
+```
+
+Returns the members of the set resulting from the intersection of all the given sets.
+Keys that do not exist are considered to be empty sets.
+
+---
+
+### SINTERSTORE
+
+#### Syntax
+
+```bash
+    SINTERSTORE destination key [key ...]
+```
+
+This command is equal to [SINTER](#INTER), but instead of returning the resulting set, it is stored in **destination**.
+
+If **destination** already exists, it is overwritten.
+
+---
+
+### SDIFF
+
+#### Syntax
+
+```bash
+    SDIFF key [key ...]
+```
+
+Returns the members of the set resulting from the difference between the **first** set and all the successive sets. 
+
+**Keys** that do not exist are considered to be empty sets.
+
+---
+
+### SDIFFSTORE
+
+#### Syntax
+
+```bash
+    SDIFFSTORE destination key [key ...]
+```
+
+This command is equal to [SDIFF](#SDIFF), but instead of returning the resulting set, it is stored in **destination**. 
+
+If **destination** already exists, it is overwritten.
 
 ---
 
@@ -554,6 +727,25 @@ The score value should be the string representation of a numeric value, and acce
 When all the elements in a sorted set are inserted with the same score, in order to force lexicographical ordering, this command returns the number of elements in the sorted set at **key** with a value between min and max.
 
 The min and max arguments have the same meaning as described for [ZRANGEBYLEX](#zrangebylex).
+
+---
+
+### ZMSCORE
+
+#### Syntax
+
+```bash
+    ZMSCORE key member [member ...]
+```
+
+Returns the scores associated with the specified **members** in the sorted set stored at **key**.
+
+For every **member** that does not exist in the sorted set, a nil value is returned.
+
+Returns one of the following:
+
+_Nil reply:_ if the member does not exist in the sorted set.\
+_Array reply:_ a list of string **member** scores as double-precision floating point numbers.
 
 ---
 
@@ -787,7 +979,7 @@ If member does not exist in the sorted set, or **key** does not exist, nil is re
 
 ## Geospatial indices
 
-### GEOADD {#geoadd}
+### GEOADD
 
 #### Syntax
 
@@ -873,7 +1065,7 @@ The command can accept a variable number of arguments so it always returns an ar
 
 ---
 
-### GEOSEARCH {#geosearch}
+### GEOSEARCH
 
 #### Syntax
 

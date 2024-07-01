@@ -24,24 +24,19 @@ namespace Embedded.perftest
         }
 
         /// <summary>
+        /// Dispose server
+        /// </summary>
+        public new void Dispose() => base.Dispose();
+
+        public StoreWrapper StoreWrapper => storeWrapper;
+
+        /// <summary>
         /// Return a RESP session to this server
         /// </summary>
         /// <returns>A new RESP server session</returns>
         internal RespServerSession GetRespSession()
         {
-            var tempStoreWrapper =
-                new StoreWrapper(
-                    storeWrapper.version,
-                    null,
-                    storeWrapper.store,
-                    storeWrapper.objectStore,
-                    storeWrapper.objectStoreSizeTracker,
-                    storeWrapper.customCommandManager,
-                    null,
-                    storeWrapper.serverOptions,
-                    loggerFactory: storeWrapper.loggerFactory
-                );
-            return new RespServerSession(new DummyNetworkSender(), tempStoreWrapper, null);
+            return new RespServerSession(new DummyNetworkSender(), storeWrapper, null, null);
         }
     }
 }

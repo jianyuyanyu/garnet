@@ -27,7 +27,7 @@ Integer reply: the value of the key after decrementing it.
 #### Syntax
 
 ```bash
-    DECR key decrement
+    DECRBY key decrement
 ```
 
 Decrements the number stored at key by the value of parameter `decrement`. If the key does not exist, it is set to 0 before performing the operation. An error is returned if the key contains a value of the wrong type or contains a string that can not be represented as integer.
@@ -228,25 +228,6 @@ Set **key** to hold the string value and set **key** to timeout after a given nu
 #### Resp Reply
 
 Simple string reply: OK.
-
----
-
-### SETNX
-
-#### Syntax
-
-```bash
-    SETNX key value
-```
-
-Set **key** to hold value if **key** does not exist. When **key** already holds a value, no operation is performed.
-
-#### Resp Reply
-
-One of the following:
-
-* Integer reply: 0 if the key was not set.
-* Integer reply: 1 if the key was set.
 
 ---
 

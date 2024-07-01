@@ -11,9 +11,6 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Garnet.server;
-using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp;
-using Microsoft.CodeAnalysis.Text;
 using NUnit.Framework;
 using StackExchange.Redis;
 
@@ -35,7 +32,7 @@ namespace Garnet.test
             TestUtils.DeleteDirectory(TestUtils.MethodTestDir, wait: true);
             server = TestUtils.CreateGarnetServer(TestUtils.MethodTestDir,
                 disablePubSub: true,
-                extensionBinPaths: new[] { _extTestDir1, _extTestDir2 },
+                extensionBinPaths: [_extTestDir1, _extTestDir2],
                 extensionAllowUnsignedAssemblies: true);
             server.Start();
         }
@@ -322,7 +319,7 @@ namespace Garnet.test
             Assert.AreEqual(value1, (string)retValue);
 
             var result = db.Execute("MEMORY", "USAGE", mainkey);
-            var actualValue = ResultType.Integer == result.Type ? Int32.Parse(result.ToString()) : -1;
+            var actualValue = ResultType.Integer == result.Resp2Type ? Int32.Parse(result.ToString()) : -1;
             var expectedResponse = 272;
             Assert.AreEqual(expectedResponse, actualValue);
 
@@ -334,7 +331,7 @@ namespace Garnet.test
             Assert.AreEqual(value2, (string)retValue);
 
             result = db.Execute("MEMORY", "USAGE", mainkey);
-            actualValue = ResultType.Integer == result.Type ? Int32.Parse(result.ToString()) : -1;
+            actualValue = ResultType.Integer == result.Resp2Type ? Int32.Parse(result.ToString()) : -1;
             expectedResponse = 408;
             Assert.AreEqual(expectedResponse, actualValue);
         }
@@ -358,7 +355,7 @@ namespace Garnet.test
 
             db.KeyExpire(key, TimeSpan.FromSeconds(expire));
             var time = db.KeyTimeToLive(key);
-            Assert.IsTrue(time.Value.Seconds > 0);
+            Assert.IsTrue(time.Value.TotalSeconds > 0);
 
             // This conditional set should pass (new prefix is greater)
             string newValue1 = "foovalue1";
@@ -439,6 +436,36 @@ namespace Garnet.test
             Assert.AreEqual(value2, (string)retValue);
         }
 
+        [Test]
+        public void CustomObjectCommandTest3()
+        {
+            // Register sample custom command on object
+            var factory = new MyDictFactory();
+            server.Register.NewCommand("MYDICTSET", 2, CommandType.ReadModifyWrite, factory);
+            server.Register.NewCommand("MYDICTGET", 1, CommandType.Read, factory);
+
+            using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
+            var db = redis.GetDatabase(0);
+
+            var mainkey = "key";
+
+            var key1 = "mykey1";
+            var value1 = "foovalue1";
+            db.ListLeftPush(mainkey, value1);
+
+            var ex = Assert.Throws<RedisServerException>(() => db.Execute("MYDICTGET", mainkey, key1));
+            var expectedError = Encoding.ASCII.GetString(CmdStrings.RESP_ERR_WRONG_TYPE);
+            Assert.IsNotNull(ex);
+            Assert.AreEqual(expectedError, ex.Message);
+
+            var deleted = db.KeyDelete(mainkey);
+            Assert.IsTrue(deleted);
+            db.Execute("MYDICTSET", mainkey, key1, value1);
+
+            ex = Assert.Throws<RedisServerException>(() => db.ListLeftPush(mainkey, value1));
+            Assert.IsNotNull(ex);
+            Assert.AreEqual(expectedError, ex.Message);
+        }
 
         [Test]
         public async Task CustomCommandSetFollowedByTtlTestAsync()
@@ -473,7 +500,7 @@ namespace Garnet.test
         public async Task CustomCommandSetWithCustomExpirationTestAsync()
         {
             // Register sample custom command (SETWPIFPGT = "set if prefix greater than")
-            server.Register.NewCommand("SETWPIFPGTE", 2, CommandType.ReadModifyWrite, new SetWPIFPGTCustomCommand(),
+            server.Register.NewCommand("SETWPIFPGT", 2, CommandType.ReadModifyWrite, new SetWPIFPGTCustomCommand(),
                 expirationTicks: TimeSpan.FromSeconds(4).Ticks); // provide default expiration at registration time
 
             using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
@@ -483,14 +510,14 @@ namespace Garnet.test
             string origValue = "foovalue0";
             long prefix = 0;
 
-            await db.ExecuteAsync("SETWPIFPGTE", key, origValue, BitConverter.GetBytes(prefix));
+            await db.ExecuteAsync("SETWPIFPGT", key, origValue, BitConverter.GetBytes(prefix));
 
             string retValue = db.StringGet(key);
             Assert.AreEqual(origValue, retValue.Substring(8));
 
             string newValue1 = "foovalue10";
             prefix = 1;
-            await db.ExecuteAsync("SETWPIFPGTE", key, newValue1, BitConverter.GetBytes(prefix));
+            await db.ExecuteAsync("SETWPIFPGT", key, newValue1, BitConverter.GetBytes(prefix));
 
             retValue = db.StringGet(key);
             Assert.AreEqual(newValue1, retValue.Substring(8));
@@ -500,55 +527,6 @@ namespace Garnet.test
             // should be expired now
             retValue = db.StringGet(key);
             Assert.AreEqual(null, retValue);
-        }
-
-        public void CreateTestLibrary(string[] namespaces, string[] referenceFiles, string[] filesToCompile, string dstFilePath)
-        {
-            if (File.Exists(dstFilePath))
-            {
-                File.Delete(dstFilePath);
-            }
-
-            foreach (var referenceFile in referenceFiles)
-            {
-                Assert.IsTrue(File.Exists(referenceFile));
-            }
-
-            var references = referenceFiles.Select(f => MetadataReference.CreateFromFile(f));
-
-            foreach (var fileToCompile in filesToCompile)
-            {
-                Assert.IsTrue(File.Exists(fileToCompile));
-            }
-
-            var parseFunc = new Func<string, SyntaxTree>(filePath =>
-            {
-                var source = File.ReadAllText(filePath);
-                var stringText = SourceText.From(source, Encoding.UTF8);
-                return SyntaxFactory.ParseSyntaxTree(stringText,
-                    CSharpParseOptions.Default.WithLanguageVersion(LanguageVersion.CSharp10), string.Empty);
-            });
-
-            var syntaxTrees = filesToCompile.Select(f => parseFunc(f));
-
-            var compilationOptions = new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)
-                .WithAllowUnsafe(true)
-                .WithOverflowChecks(true)
-                .WithOptimizationLevel(OptimizationLevel.Release)
-                .WithUsings(namespaces);
-
-
-            var compilation = CSharpCompilation.Create(Path.GetFileName(dstFilePath), syntaxTrees, references, compilationOptions);
-
-            try
-            {
-                var result = compilation.Emit(dstFilePath);
-                Assert.IsTrue(result.Success);
-            }
-            catch (Exception ex)
-            {
-                Assert.Fail(ex.Message);
-            }
         }
 
         private string[] CreateTestLibraries()
@@ -577,25 +555,18 @@ namespace Garnet.test
                 Path.Combine(runtimePath, "System.Core.dll"),
                 Path.Combine(runtimePath, "System.Private.CoreLib.dll"),
                 Path.Combine(runtimePath, "System.Runtime.dll"),
-                Path.Combine(binPath, $"Tsavorite.core.dll"),
-                Path.Combine(binPath, $"Garnet.common.dll"),
-                Path.Combine(binPath, $"Garnet.server.dll"),
+                Path.Combine(binPath, "Tsavorite.core.dll"),
+                Path.Combine(binPath, "Garnet.common.dll"),
+                Path.Combine(binPath, "Garnet.server.dll"),
             };
 
             var dir1 = Path.Combine(this._extTestDir1, Path.GetFileName(TestUtils.MethodTestDir));
             var dir2 = Path.Combine(this._extTestDir2, Path.GetFileName(TestUtils.MethodTestDir));
 
-            if (!Directory.Exists(this._extTestDir1))
-                Directory.CreateDirectory(this._extTestDir1);
-
-            if (!Directory.Exists(dir1))
-                Directory.CreateDirectory(dir1);
-
-            if (!Directory.Exists(this._extTestDir2))
-                Directory.CreateDirectory(this._extTestDir2);
-
-            if (!Directory.Exists(dir2))
-                Directory.CreateDirectory(dir2);
+            Directory.CreateDirectory(this._extTestDir1);
+            Directory.CreateDirectory(dir1);
+            Directory.CreateDirectory(this._extTestDir2);
+            Directory.CreateDirectory(dir2);
 
             var testFilePath = Path.Combine(TestUtils.MethodTestDir, "test.cs");
             using (var testFile = File.CreateText(testFilePath))
@@ -605,18 +576,18 @@ namespace Garnet.test
 
             var libPathToFiles = new Dictionary<string, string[]>
             {
-                { Path.Combine(dir1, "testLib1.dll"), new [] {@"../../../../../../main/GarnetServer/Extensions/MyDictObject.cs"}},
-                { Path.Combine(dir2, "testLib2.dll"), new [] {@"../../../../../../main/GarnetServer/Extensions/SetIfPM.cs"}},
+                { Path.Combine(dir1, "testLib1.dll"), new [] { Path.GetFullPath(@"../main/GarnetServer/Extensions/MyDictObject.cs", TestUtils.RootTestsProjectPath) }},
+                { Path.Combine(dir2, "testLib2.dll"), new [] { Path.GetFullPath(@"../main/GarnetServer/Extensions/SetIfPM.cs", TestUtils.RootTestsProjectPath) }},
                 { Path.Combine(dir2, "testLib3.dll"), new []
                 {
-                    @"../../../../../../main/GarnetServer/Extensions/ReadWriteTxn.cs",
+                    Path.GetFullPath(@"../main/GarnetServer/Extensions/ReadWriteTxn.cs", TestUtils.RootTestsProjectPath),
                     testFilePath,
                 }}
             };
 
             foreach (var ltf in libPathToFiles)
             {
-                this.CreateTestLibrary(namespaces, referenceFiles, ltf.Value, ltf.Key);
+                TestUtils.CreateTestLibrary(namespaces, referenceFiles, ltf.Value, ltf.Key);
             }
 
             var notAllowedPath = Path.Combine(TestUtils.MethodTestDir, "testLib1.dll");
@@ -625,7 +596,7 @@ namespace Garnet.test
                 File.Copy(Path.Combine(dir1, "testLib1.dll"), notAllowedPath);
             }
 
-            return new[] { Path.Combine(dir1, "testLib1.dll"), dir2 };
+            return [Path.Combine(dir1, "testLib1.dll"), dir2];
         }
 
         [Test]
@@ -719,14 +690,14 @@ namespace Garnet.test
             }
             catch (RedisServerException rse)
             {
-                Assert.AreEqual(Encoding.ASCII.GetString(CmdStrings.RESP_MALFORMED_REGISTERCS_COMMAND), $"-{rse.Message}\r\n");
+                Assert.AreEqual(Encoding.ASCII.GetString(CmdStrings.RESP_ERR_GENERIC_MALFORMED_REGISTERCS_COMMAND), rse.Message);
             }
             Assert.IsNull(resp);
 
             // Malformed request #2 - binary paths before sub-command
             var args = new List<object>() { "SRC" };
             args.AddRange(libraryPaths);
-            args.AddRange(new object[] { "TXN", "READWRITETX", 3, "ReadWriteTxn" });
+            args.AddRange(["TXN", "READWRITETX", 3, "ReadWriteTxn"]);
 
             try
             {
@@ -734,16 +705,20 @@ namespace Garnet.test
             }
             catch (RedisServerException rse)
             {
-                Assert.AreEqual(Encoding.ASCII.GetString(CmdStrings.RESP_MALFORMED_REGISTERCS_COMMAND), $"-{rse.Message}\r\n");
+                Assert.AreEqual(Encoding.ASCII.GetString(CmdStrings.RESP_ERR_GENERIC_MALFORMED_REGISTERCS_COMMAND), rse.Message);
             }
             Assert.IsNull(resp);
 
             // Binary file not contained in allowed paths
-            args = new List<object>
-            {
-                "RMW", "MYDICTSET", 2, "MyDictFactory",
-                "SRC", Path.Combine(TestUtils.MethodTestDir, "testLib1.dll")
-            };
+            args =
+            [
+                "RMW",
+                "MYDICTSET",
+                2,
+                "MyDictFactory",
+                "SRC",
+                Path.Combine(TestUtils.MethodTestDir, "testLib1.dll")
+            ];
 
             try
             {
@@ -751,17 +726,20 @@ namespace Garnet.test
             }
             catch (RedisServerException rse)
             {
-                Assert.AreEqual(Encoding.ASCII.GetString(CmdStrings.RESP_ERROR_BINARY_FILES_NOT_IN_ALLOWED_PATHS), $"-{rse.Message}\r\n");
+                Assert.AreEqual(Encoding.ASCII.GetString(CmdStrings.RESP_ERR_GENERIC_BINARY_FILES_NOT_IN_ALLOWED_PATHS), rse.Message);
             }
             Assert.IsNull(resp);
 
             // Class not in supplied dlls
-            args = new List<object>
-            {
-                "RMW", "MYDICTSET", 2, "MyDictFactory",
+            args =
+            [
+                "RMW",
+                "MYDICTSET",
+                2,
+                "MyDictFactory",
                 "SRC",
-            };
-            args.AddRange(libraryPaths.Skip(1));
+                .. libraryPaths.Skip(1),
+            ];
 
             try
             {
@@ -769,17 +747,20 @@ namespace Garnet.test
             }
             catch (RedisServerException rse)
             {
-                Assert.AreEqual(Encoding.ASCII.GetString(CmdStrings.RESP_ERROR_INSTANTIATING_CLASS), $"-{rse.Message}\r\n");
+                Assert.AreEqual(Encoding.ASCII.GetString(CmdStrings.RESP_ERR_GENERIC_INSTANTIATING_CLASS), rse.Message);
             }
             Assert.IsNull(resp);
 
             // Class not in supported
-            args = new List<object>
-            {
-                "RMW", "MYDICTSET", 2, "TestClass",
+            args =
+            [
+                "RMW",
+                "MYDICTSET",
+                2,
+                "TestClass",
                 "SRC",
-            };
-            args.AddRange(libraryPaths);
+                .. libraryPaths,
+            ];
 
             try
             {
@@ -787,7 +768,7 @@ namespace Garnet.test
             }
             catch (RedisServerException rse)
             {
-                Assert.AreEqual(Encoding.ASCII.GetString(CmdStrings.RESP_ERROR_REGISTERCS_UNSUPPORTED_CLASS), $"-{rse.Message}\r\n");
+                Assert.AreEqual(Encoding.ASCII.GetString(CmdStrings.RESP_ERR_GENERIC_REGISTERCS_UNSUPPORTED_CLASS), rse.Message);
             }
             Assert.IsNull(resp);
         }

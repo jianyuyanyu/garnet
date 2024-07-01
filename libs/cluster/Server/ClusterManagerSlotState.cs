@@ -3,7 +3,7 @@
 
 using System;
 using System.Collections.Generic;
-using System.Runtime.CompilerServices;
+using System.Linq;
 using System.Text;
 using System.Threading;
 using Garnet.common;
@@ -21,12 +21,12 @@ namespace Garnet.cluster
     internal sealed partial class ClusterManager : IDisposable
     {
         /// <summary>
-        /// Add slots to local worker
+        /// Try to add slots to local worker
         /// </summary>
-        /// <param name="slots"></param>
-        /// <param name="slotAssigned"></param>
-        /// <returns></returns>
-        public bool TryAddSlots(List<int> slots, out int slotAssigned)
+        /// <param name="slots">Slot list</param>
+        /// <param name="slotAssigned">Slot number of already assigned slot</param>
+        /// <returns>True on success, false otherwise</returns>
+        public bool TryAddSlots(HashSet<int> slots, out int slotAssigned)
         {
             slotAssigned = -1;
             while (true)
@@ -34,8 +34,7 @@ namespace Garnet.cluster
                 var current = currentConfig;
                 if (current.NumWorkers == 0) return false;
 
-                var newConfig = currentConfig.AddSlots(slots, out var slot);
-                if (slot != -1)
+                if (!currentConfig.TryAddSlots(slots, out var slot, out var newConfig))
                 {
                     slotAssigned = slot;
                     return false;
@@ -44,17 +43,17 @@ namespace Garnet.cluster
                     break;
             }
             FlushConfig();
-            logger?.LogTrace("ADD SLOTS {slots}", GetRange(slots));
+            logger?.LogTrace("ADD SLOTS {slots}", GetRange(slots.ToArray()));
             return true;
         }
 
         /// <summary>
-        /// Remove ownernship of slots. Slot state transition to OFFLINE.
+        /// Try to remove ownership of slots. Slot state transition to OFFLINE.
         /// </summary>
-        /// <param name="slots"></param>
-        /// <param name="notLocalSlot"></param>
-        /// <returns></returns>
-        public bool TryRemoveSlots(List<int> slots, out int notLocalSlot)
+        /// <param name="slots">Slot list</param>
+        /// <param name="notLocalSlot">The slot number that is not local.</param>
+        /// <returns><see langword="false"/> if a slot provided is not local; otherwise <see langword="true"/>.</returns>
+        public bool TryRemoveSlots(HashSet<int> slots, out int notLocalSlot)
         {
             notLocalSlot = -1;
 
@@ -63,8 +62,8 @@ namespace Garnet.cluster
                 var current = currentConfig;
                 if (current.NumWorkers == 0) return false;
 
-                var newConfig = currentConfig.RemoveSlots(slots, out var slot);
-                if (slot != -1)
+                if (!currentConfig.TryRemoveSlots(slots, out var slot, out var newConfig) &&
+                    slot != -1)
                 {
                     notLocalSlot = slot;
                     return false;
@@ -74,52 +73,53 @@ namespace Garnet.cluster
                     break;
             }
             FlushConfig();
-            logger?.LogTrace("REMOVE SLOTS {slots}", String.Join(",", slots));
+            logger?.LogTrace("REMOVE SLOTS {slots}", string.Join(",", slots));
             return true;
         }
 
         /// <summary>
-        /// Prepare node for migration of slot to node with specified node Id.
+        /// Try to prepare node for migration of slot to node with specified node Id.
         /// </summary>
-        /// <param name="slot"></param>
-        /// <param name="nodeid"></param>
-        /// <param name="resp"></param>
-        /// <returns></returns>
-        public bool PrepareSlotForMigration(int slot, string nodeid, out ReadOnlySpan<byte> resp)
+        /// <param name="slot">Slot to change state</param>
+        /// <param name="nodeid">Migration target node-id</param>
+        /// <param name="errorMessage">Error message</param>
+        /// <returns>True on success, false otherwise</returns>
+        public bool TryPrepareSlotForMigration(int slot, string nodeid, out ReadOnlySpan<byte> errorMessage)
         {
+            errorMessage = default;
             while (true)
             {
                 var current = currentConfig;
-                int migratingWorkerId = current.GetWorkerIdFromNodeId(nodeid);
+                var migratingWorkerId = current.GetWorkerIdFromNodeId(nodeid);
 
                 if (migratingWorkerId == 0)
                 {
-                    resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes($"-ERR I don't know about node {nodeid}\r\n"));
+                    errorMessage = Encoding.ASCII.GetBytes($"ERR I don't know about node {nodeid}");
                     return false;
                 }
 
-                if (current.GetLocalNodeId().Equals(nodeid))
+                if (current.LocalNodeId.Equals(nodeid, StringComparison.OrdinalIgnoreCase))
                 {
-                    resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes("-ERR Can't MIGRATE to myself\r\n"));
+                    errorMessage = CmdStrings.RESP_ERR_GENERIC_MIGRATE_TO_MYSELF;
                     return false;
                 }
 
                 if (current.GetNodeRoleFromNodeId(nodeid) != NodeRole.PRIMARY)
                 {
-                    resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes($"-ERR Target node {nodeid} is not a master node.\r\n"));
+                    errorMessage = Encoding.ASCII.GetBytes($"ERR Target node {nodeid} is not a master node.");
                     return false;
                 }
 
                 if (!current.IsLocal((ushort)slot))
                 {
-                    resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes($"-ERR I'm not the owner of hash slot {slot}\r\n"));
+                    errorMessage = Encoding.ASCII.GetBytes($"ERR I'm not the owner of hash slot {slot}");
                     return false;
                 }
 
                 if (current.GetState((ushort)slot) != SlotState.STABLE)
                 {
                     var _migratingNodeId = current.GetNodeIdFromSlot((ushort)slot);
-                    resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes($"-ERR Slot already scheduled for migration from {_migratingNodeId}\r\n"));
+                    errorMessage = Encoding.ASCII.GetBytes($"ERR Slot already scheduled for migration from {_migratingNodeId}");
                     return false;
                 }
 
@@ -130,7 +130,7 @@ namespace Garnet.cluster
                 var newConfig = current.UpdateSlotState(slot, migratingWorkerId, SlotState.MIGRATING);
                 if (newConfig == null)
                 {
-                    resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes($"-ERR Slot already in that state.\r\n"));
+                    errorMessage = CmdStrings.RESP_ERR_GENERIC_SLOTSTATE_TRANSITION;
                     return false;
                 }
 
@@ -140,59 +140,59 @@ namespace Garnet.cluster
             FlushConfig();
 
             logger?.LogInformation("MIGRATE {slot} TO {currentConfig.GetWorkerAddressFromNodeId(nodeid)}", slot, currentConfig.GetWorkerAddressFromNodeId(nodeid));
-            resp = CmdStrings.RESP_OK;
             return true;
         }
 
         /// <summary>
-        /// Change list of slots to migrating state
+        /// Try to change list of slots to migrating state
         /// </summary>
-        /// <param name="slots"></param>
-        /// <param name="nodeid"></param>
-        /// <param name="resp"></param>
-        /// <returns></returns>
-        public bool PrepareSlotsForMigration(HashSet<int> slots, string nodeid, out ReadOnlySpan<byte> resp)
+        /// <param name="slots">Slot list</param>
+        /// <param name="nodeid">Migration target node-id</param>
+        /// <param name="errorMessage">Error message</param>
+        /// <returns>True on success, false otherwise</returns>
+        public bool TryPrepareSlotsForMigration(HashSet<int> slots, string nodeid, out ReadOnlySpan<byte> errorMessage)
         {
+            errorMessage = default;
             while (true)
             {
                 var current = currentConfig;
-                int migratingWorkerId = current.GetWorkerIdFromNodeId(nodeid);
+                var migratingWorkerId = current.GetWorkerIdFromNodeId(nodeid);
 
-                //Check migrating worker is a known valid worker
+                // Check migrating worker is a known valid worker
                 if (migratingWorkerId == 0)
                 {
-                    resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes($"-ERR I don't know about node {nodeid}\r\n"));
+                    errorMessage = Encoding.ASCII.GetBytes($"ERR I don't know about node {nodeid}");
                     return false;
                 }
 
-                //Check if nodeid is different from local node
-                if (current.GetLocalNodeId().Equals(nodeid))
+                // Check if node-id is different from local node
+                if (current.LocalNodeId.Equals(nodeid, StringComparison.OrdinalIgnoreCase))
                 {
-                    resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes("-ERR Can't MIGRATE to myself\r\n"));
+                    errorMessage = CmdStrings.RESP_ERR_GENERIC_MIGRATE_TO_MYSELF;
                     return false;
                 }
 
-                //Check if local node is primary
+                // Check if local node is primary
                 if (current.GetNodeRoleFromNodeId(nodeid) != NodeRole.PRIMARY)
                 {
-                    resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes($"-ERR Target node {nodeid} is not a master node.\r\n"));
+                    errorMessage = Encoding.ASCII.GetBytes($"ERR Target node {nodeid} is not a master node.");
                     return false;
                 }
 
                 foreach (var slot in slots)
                 {
-                    //Check if slot is owned by local node
+                    // Check if slot is owned by local node
                     if (!current.IsLocal((ushort)slot))
                     {
-                        resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes($"-ERR I'm not the owner of hash slot {slot}\r\n"));
+                        errorMessage = Encoding.ASCII.GetBytes($"ERR I'm not the owner of hash slot {slot}");
                         return false;
                     }
 
-                    //Check node state is stable
+                    // Check node state is stable
                     if (current.GetState((ushort)slot) != SlotState.STABLE)
                     {
                         var _migratingNodeId = current.GetNodeIdFromSlot((ushort)slot);
-                        resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes($"-ERR Slot already scheduled for migration from {_migratingNodeId}\r\n"));
+                        errorMessage = Encoding.ASCII.GetBytes($"ERR Slot already scheduled for migration from {_migratingNodeId}");
                         return false;
                     }
                 }
@@ -207,52 +207,52 @@ namespace Garnet.cluster
             }
             FlushConfig();
 
-            logger?.LogInformation("MIGRATE {slot} TO {migrating node}", String.Join(' ', slots), currentConfig.GetWorkerAddressFromNodeId(nodeid));
-            resp = CmdStrings.RESP_OK;
+            logger?.LogInformation("MIGRATE {slot} TO {migrating node}", string.Join(' ', slots), currentConfig.GetWorkerAddressFromNodeId(nodeid));
             return true;
         }
 
         /// <summary>
-        /// Prepare node for import of slot from node with specified nodeid.
+        /// Try to prepare node for import of slot from node with specified nodeid.
         /// </summary>
-        /// <param name="slot"></param>
-        /// <param name="nodeid"></param>
-        /// <param name="resp"></param>
-        /// <returns></returns>       
-        public bool PrepareSlotForImport(int slot, string nodeid, out ReadOnlySpan<byte> resp)
+        /// <param name="slot">Slot list</param>
+        /// <param name="nodeid">Importing source node-id</param>
+        /// <param name="errorMessage">Error message</param>
+        /// <returns>True on success, false otherwise</returns>       
+        public bool TryPrepareSlotForImport(int slot, string nodeid, out ReadOnlySpan<byte> errorMessage)
         {
+            errorMessage = default;
             while (true)
             {
                 var current = currentConfig;
-                int importingWorkerId = current.GetWorkerIdFromNodeId(nodeid);
+                var importingWorkerId = current.GetWorkerIdFromNodeId(nodeid);
                 if (importingWorkerId == 0)
                 {
-                    resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes($"-ERR I don't know about node {nodeid}\r\n"));
+                    errorMessage = Encoding.ASCII.GetBytes($"ERR I don't know about node {nodeid}");
                     return false;
                 }
 
-                if (current.GetLocalNodeRole() != NodeRole.PRIMARY)
+                if (current.LocalNodeRole != NodeRole.PRIMARY)
                 {
-                    resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes($"-ERR Importing node {current.GetLocalNodeRole()} is not a master node.\r\n"));
+                    errorMessage = Encoding.ASCII.GetBytes($"ERR Importing node {current.LocalNodeRole} is not a master node.");
                     return false;
                 }
 
-                if (current.IsLocal((ushort)slot, readCommand: false))
+                if (current.IsLocal((ushort)slot, readWriteSession: false))
                 {
-                    resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes($"-ERR This is a local hash slot {slot} and is already imported\r\n"));
+                    errorMessage = Encoding.ASCII.GetBytes($"ERR This is a local hash slot {slot} and is already imported");
                     return false;
                 }
 
-                string sourceNodeId = current.GetNodeIdFromSlot((ushort)slot);
-                if (sourceNodeId == null || !sourceNodeId.Equals(nodeid))
+                var sourceNodeId = current.GetNodeIdFromSlot((ushort)slot);
+                if (sourceNodeId == null || !sourceNodeId.Equals(nodeid, StringComparison.OrdinalIgnoreCase))
                 {
-                    resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes($"-ERR Slot {slot} is not owned by {nodeid}\r\n"));
+                    errorMessage = Encoding.ASCII.GetBytes($"ERR Slot {slot} is not owned by {nodeid}");
                     return false;
                 }
 
                 if (current.GetState((ushort)slot) != SlotState.STABLE)
                 {
-                    resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes($"-ERR Slot already scheduled for import from {nodeid}\r\n"));
+                    errorMessage = Encoding.ASCII.GetBytes($"ERR Slot already scheduled for import from {nodeid}");
                     return false;
                 }
 
@@ -263,60 +263,59 @@ namespace Garnet.cluster
             FlushConfig();
 
             logger?.LogInformation("IMPORT {slot} FROM {currentConfig.GetWorkerAddressFromNodeId(nodeid)}", slot, currentConfig.GetWorkerAddressFromNodeId(nodeid));
-            resp = CmdStrings.RESP_OK;
             return true;
         }
 
         /// <summary>
-        /// Prepare node for import of slots from node with specified nodeid.
+        /// Try to prepare node for import of slots from node with specified nodeid.
         /// </summary>
-        /// <param name="slots"></param>
-        /// <param name="nodeid"></param>
-        /// <param name="resp"></param>
-        /// <returns></returns>
-        public bool PrepareSlotsForImport(HashSet<int> slots, string nodeid, out ReadOnlySpan<byte> resp)
+        /// <param name="slots">Slot list</param>
+        /// <param name="nodeid">Migration target node-id</param>
+        /// <param name="errorMessage">Error message</param>
+        /// <returns>True on success, false otherwise</returns>
+        public bool TryPrepareSlotsForImport(HashSet<int> slots, string nodeid, out ReadOnlySpan<byte> errorMessage)
         {
-            resp = CmdStrings.RESP_OK;
+            errorMessage = default;
             while (true)
             {
                 var current = currentConfig;
-                int importingWorkerId = current.GetWorkerIdFromNodeId(nodeid);
-                //Check importing nodeId is valid
+                var importingWorkerId = current.GetWorkerIdFromNodeId(nodeid);
+                // Check importing nodeId is valid
                 if (importingWorkerId == 0)
                 {
-                    resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes($"-ERR I don't know about node {nodeid}\r\n"));
+                    errorMessage = Encoding.ASCII.GetBytes($"ERR I don't know about node {nodeid}");
                     return false;
                 }
 
-                //Check local node is a primary
-                if (current.GetLocalNodeRole() != NodeRole.PRIMARY)
+                // Check local node is a primary
+                if (current.LocalNodeRole != NodeRole.PRIMARY)
                 {
-                    resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes($"-ERR Importing node {current.GetLocalNodeRole()} is not a master node.\r\n"));
+                    errorMessage = Encoding.ASCII.GetBytes($"ERR Importing node {current.LocalNodeRole} is not a master node.");
                     return false;
                 }
 
-                //Check validity of slots
+                // Check validity of slots
                 foreach (var slot in slots)
                 {
-                    //can only import remote slots
-                    if (current.IsLocal((ushort)slot, readCommand: false))
+                    // Can only import remote slots
+                    if (current.IsLocal((ushort)slot, readWriteSession: false))
                     {
-                        resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes($"-ERR This is a local hash slot {slot} and is already imported\r\n"));
+                        errorMessage = Encoding.ASCII.GetBytes($"ERR This is a local hash slot {slot} and is already imported");
                         return false;
                     }
 
-                    //check if node is owned by node
-                    string sourceNodeId = current.GetNodeIdFromSlot((ushort)slot);
-                    if (sourceNodeId == null || !sourceNodeId.Equals(nodeid))
+                    // Check if node is owned by node
+                    var sourceNodeId = current.GetNodeIdFromSlot((ushort)slot);
+                    if (sourceNodeId == null || !sourceNodeId.Equals(nodeid, StringComparison.OrdinalIgnoreCase))
                     {
-                        resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes($"-ERR Slot {slot} is not owned by {nodeid}\r\n"));
+                        errorMessage = Encoding.ASCII.GetBytes($"ERR Slot {slot} is not owned by {nodeid}");
                         return false;
                     }
 
-                    //check if slot is in stable state
+                    // Check if slot is in stable state
                     if (current.GetState((ushort)slot) != SlotState.STABLE)
                     {
-                        resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes($"-ERR Slot already scheduled for import from {nodeid}\r\n"));
+                        errorMessage = Encoding.ASCII.GetBytes($"ERR Slot already scheduled for import from {nodeid}");
                         return false;
                     }
                 }
@@ -326,30 +325,29 @@ namespace Garnet.cluster
                     break;
             }
 
-            logger?.LogInformation("IMPORT {slot} FROM {importingNode}", String.Join(' ', slots), currentConfig.GetWorkerAddressFromNodeId(nodeid));
-            resp = CmdStrings.RESP_OK;
+            logger?.LogInformation("IMPORT {slot} FROM {importingNode}", string.Join(' ', slots), currentConfig.GetWorkerAddressFromNodeId(nodeid));
             return true;
         }
 
         /// <summary>
-        /// Change ownership of slot to node.
+        /// Try to change ownership of slot to node.
         /// </summary>
-        /// <param name="slot"></param>
-        /// <param name="nodeid"></param>
-        /// <param name="resp"></param>
-        /// <returns></returns>
-        public bool PrepareSlotForOwnershipChange(int slot, string nodeid, out ReadOnlySpan<byte> resp)
+        /// <param name="slot">Slot list</param>
+        /// <param name="nodeid">Importing source node-id</param>
+        /// <param name="errorMesage">Error message</param>
+        /// <returns>True on success, false otherwise</returns>
+        public bool TryPrepareSlotForOwnershipChange(int slot, string nodeid, out ReadOnlySpan<byte> errorMesage)
         {
-            resp = CmdStrings.RESP_OK;
+            errorMesage = default;
             var current = currentConfig;
-            int workerId = current.GetWorkerIdFromNodeId(nodeid);
+            var workerId = current.GetWorkerIdFromNodeId(nodeid);
             if (workerId == 0)
             {
-                resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes($"-ERR I don't know about node {nodeid}\r\n"));
+                errorMesage = Encoding.ASCII.GetBytes($"ERR I don't know about node {nodeid}");
                 return false;
             }
 
-            if (current.GetState((ushort)slot) == SlotState.MIGRATING)
+            if (current.GetState((ushort)slot) is SlotState.MIGRATING)
             {
                 while (true)
                 {
@@ -364,11 +362,11 @@ namespace Garnet.cluster
                 logger?.LogInformation("SLOT {slot} IMPORTED TO {nodeid}", slot, currentConfig.GetWorkerAddressFromNodeId(nodeid));
                 return true;
             }
-            else if (current.GetState((ushort)slot) == SlotState.IMPORTING)
+            else if (current.GetState((ushort)slot) is SlotState.IMPORTING)
             {
-                if (!current.GetLocalNodeId().Equals(nodeid))
+                if (!current.LocalNodeId.Equals(nodeid, StringComparison.OrdinalIgnoreCase))
                 {
-                    resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes($"-ERR Input nodeid {nodeid} different from local nodeid {CurrentConfig.GetLocalNodeId()}.\r\n"));
+                    errorMesage = Encoding.ASCII.GetBytes($"ERR Input nodeid {nodeid} different from local nodeid {CurrentConfig.LocalNodeId}.");
                     return false;
                 }
 
@@ -389,27 +387,27 @@ namespace Garnet.cluster
         }
 
         /// <summary>
-        /// Change ownership of slots to node.
+        /// Try to change ownership of slots to node.
         /// </summary>
-        /// <param name="slots"></param>
-        /// <param name="nodeid"></param>
-        /// <param name="resp"></param>
-        /// <returns></returns>
-        public bool PrepareSlotsForOwnershipChange(HashSet<int> slots, string nodeid, out ReadOnlySpan<byte> resp)
+        /// <param name="slots">SLot list</param>
+        /// <param name="nodeid">The id of the new owner node.</param>
+        /// <param name="errorMessage">Error message</param>
+        /// <returns>True on success, false otherwise</returns>
+        public bool TryPrepareSlotsForOwnershipChange(HashSet<int> slots, string nodeid, out ReadOnlySpan<byte> errorMessage)
         {
-            resp = CmdStrings.RESP_OK;
+            errorMessage = default;
             while (true)
             {
                 var current = currentConfig;
-                int workerId = current.GetWorkerIdFromNodeId(nodeid);
+                var workerId = current.GetWorkerIdFromNodeId(nodeid);
                 if (workerId == 0)
                 {
-                    resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes($"-ERR I don't know about node {nodeid}\r\n"));
+                    errorMessage = Encoding.ASCII.GetBytes($"ERR I don't know about node {nodeid}");
                     return false;
                 }
 
                 var newConfig = currentConfig.UpdateMultiSlotState(slots, workerId, SlotState.STABLE);
-                if (current.GetLocalNodeId().Equals(nodeid)) newConfig = newConfig.BumpLocalNodeConfigEpoch();
+                if (current.LocalNodeId.Equals(nodeid, StringComparison.OrdinalIgnoreCase)) newConfig = newConfig.BumpLocalNodeConfigEpoch();
                 if (Interlocked.CompareExchange(ref currentConfig, newConfig, current) == current)
                     break;
             }
@@ -420,69 +418,54 @@ namespace Garnet.cluster
         }
 
         /// <summary>
-        /// Reset slot state to stable
+        /// Reset slot state to <see cref="SlotState.STABLE"/>
         /// </summary>
-        /// <param name="slot"></param>       
-        /// <param name="resp"></param>
-        /// <returns></returns>
-        public bool ResetSlotState(int slot, out ReadOnlySpan<byte> resp)
+        /// <param name="slot">Slot id to reset state</param>
+        public void ResetSlotState(int slot)
         {
-            resp = CmdStrings.RESP_OK;
             var current = currentConfig;
             var slotState = current.GetState((ushort)slot);
-            if (slotState == SlotState.MIGRATING || slotState == SlotState.IMPORTING)
+            if (slotState is SlotState.MIGRATING or SlotState.IMPORTING)
             {
                 while (true)
                 {
                     current = currentConfig;
                     slotState = current.GetState((ushort)slot);
-                    var workerId = slotState == SlotState.MIGRATING ? 1 : currentConfig.GetWorkerIdFromSlot((ushort)slot);
+                    var workerId = slotState == SlotState.MIGRATING ? 1 : current.GetWorkerIdFromSlot((ushort)slot);
                     var newConfig = currentConfig.UpdateSlotState(slot, workerId, SlotState.STABLE);
                     if (Interlocked.CompareExchange(ref currentConfig, newConfig, current) == current)
                         break;
                 }
                 FlushConfig();
             }
-            return true;
         }
 
         /// <summary>
-        /// Reset local slot state to stable
+        /// Reset local slot state to <see cref="SlotState.STABLE"/>
         /// </summary>
-        /// <param name="slots"></param>
-        /// <param name="resp"></param>
-        /// <returns></returns>
-        public bool ResetSlotsState(HashSet<int> slots, out ReadOnlySpan<byte> resp)
+        /// <param name="slots">Slot list</param>
+        public void ResetSlotsState(HashSet<int> slots)
         {
-            resp = CmdStrings.RESP_OK;
             foreach (var slot in slots)
-                if (!ResetSlotState(slot, out resp))
-                    return false;
-            return true;
+            {
+                ResetSlotState(slot);
+            }
         }
-
-        /// <summary>
-        /// Check if slot is in importing state.
-        /// </summary>
-        /// <param name="slot"></param>
-        /// <returns></returns>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool IsImporting(ushort slot) => currentConfig.GetState(slot) == SlotState.IMPORTING;
 
         /// <summary>
         /// Methods used to cleanup keys for given slot collection in main store
         /// </summary>
         /// <param name="BasicGarnetApi"></param>
-        /// <param name="slots"></param>
-        public unsafe void DeleteKeysInSlotsFromMainStore(BasicGarnetApi BasicGarnetApi, HashSet<int> slots)
+        /// <param name="slots">Slot list</param>
+        public static unsafe void DeleteKeysInSlotsFromMainStore(BasicGarnetApi BasicGarnetApi, HashSet<int> slots)
         {
             using var iter = BasicGarnetApi.IterateMainStore();
-            while (iter.GetNext(out var recordInfo))
+            while (iter.GetNext(out _))
             {
-                ref SpanByte key = ref iter.GetKey();
-                var s = NumUtils.HashSlot(key.ToPointer(), key.Length);
+                ref var key = ref iter.GetKey();
+                var s = HashSlotUtils.HashSlot(ref key);
                 if (slots.Contains(s))
-                    BasicGarnetApi.DELETE(ref key, StoreType.Main);
+                    _ = BasicGarnetApi.DELETE(ref key, StoreType.Main);
             }
         }
 
@@ -490,17 +473,17 @@ namespace Garnet.cluster
         /// Methods used to cleanup keys for given slot collection in object store
         /// </summary>
         /// <param name="BasicGarnetApi"></param>
-        /// <param name="slots"></param>
-        public unsafe void DeleteKeysInSlotsFromObjectStore(BasicGarnetApi BasicGarnetApi, HashSet<int> slots)
+        /// <param name="slots">Slot list</param>
+        public static unsafe void DeleteKeysInSlotsFromObjectStore(BasicGarnetApi BasicGarnetApi, HashSet<int> slots)
         {
             using var iterObject = BasicGarnetApi.IterateObjectStore();
-            while (iterObject.GetNext(out var recordInfo))
+            while (iterObject.GetNext(out _))
             {
                 ref var key = ref iterObject.GetKey();
                 ref var value = ref iterObject.GetValue();
-                var s = NumUtils.HashSlot(key);
+                var s = HashSlotUtils.HashSlot(key);
                 if (slots.Contains(s))
-                    BasicGarnetApi.DELETE(key, StoreType.Object);
+                    _ = BasicGarnetApi.DELETE(key, StoreType.Object);
             }
         }
     }

@@ -46,7 +46,7 @@ namespace Garnet
         {
             int offset = 0;
             bool result = true;
-            BitmapOperation[] bitwiseOps = new BitmapOperation[] { BitmapOperation.AND, BitmapOperation.OR, BitmapOperation.XOR };
+            BitmapOperation[] bitwiseOps = [BitmapOperation.AND, BitmapOperation.OR, BitmapOperation.XOR];
 
             //get paramaters
             var bitmapA = GetNextArg(input, ref offset);
@@ -56,9 +56,9 @@ namespace Garnet
             var bitmapB = GetNextArg(input, ref offset);
 
             //simple set and get for bitmaps
-            api.StringSetBit(bitmapA, offsetArgument, bitValueArgument.Bytes[0] == '1', out _);
+            api.StringSetBit(bitmapA, offsetArgument, bitValueArgument.ToArray()[0] == '1', out _);
             api.StringGetBit(bitmapA, offsetArgument, out bool storedBitValue);
-            if (storedBitValue != (bitValueArgument.Bytes[0] == '1'))
+            if (storedBitValue != (bitValueArgument.ToArray()[0] == '1'))
             {
                 result = false;
                 goto returnTo;
@@ -78,14 +78,14 @@ namespace Garnet
             api.SET(bitmapA, data);
 
             //Not operator
-            api.StringBitOperation(BitmapOperation.NOT, destinationKeyBitOp, new ArgSlice[] { bitmapA }, out long size);
+            api.StringBitOperation(BitmapOperation.NOT, destinationKeyBitOp, [bitmapA], out long size);
             if (size != 8)
             {
                 result = false;
                 goto returnTo;
             }
             api.GET(destinationKeyBitOp, out var valueData);
-            var actualResultBitOp = BitConverter.ToInt64(valueData.Bytes, 0);
+            var actualResultBitOp = BitConverter.ToInt64(valueData.ToArray(), 0);
 
             long expectedResultBitOp = ~src;
             if (expectedResultBitOp != actualResultBitOp)
@@ -101,14 +101,14 @@ namespace Garnet
             //apply operators
             for (int i = 0; i < bitwiseOps.Length; i++)
             {
-                api.StringBitOperation(bitwiseOps[i], destinationKeyBitOp, new ArgSlice[] { bitmapA, bitmapB }, out size);
+                api.StringBitOperation(bitwiseOps[i], destinationKeyBitOp, [bitmapA, bitmapB], out size);
                 if (size != 8)
                 {
                     result = false;
                     goto returnTo;
                 }
                 api.GET(destinationKeyBitOp, out valueData);
-                actualResultBitOp = BitConverter.ToInt64(valueData.Bytes, 0);
+                actualResultBitOp = BitConverter.ToInt64(valueData.ToArray(), 0);
                 switch (bitwiseOps[i])
                 {
                     case BitmapOperation.AND:
@@ -129,7 +129,7 @@ namespace Garnet
             }
 
             //bitfield command
-            data = new byte[1] { (byte)'P' };
+            data = [(byte)'P'];
             api.SET(bitmapA, data);
             var listCommands = new List<BitFieldCmdArgs>();
 

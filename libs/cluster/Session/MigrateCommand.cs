@@ -11,7 +11,6 @@ using Tsavorite.core;
 
 namespace Garnet.cluster
 {
-
     internal sealed unsafe partial class ClusterSession : IClusterSession
     {
         public static bool Expired(ref SpanByte value) => value.MetadataSize > 0 && value.ExtraMetadata < DateTimeOffset.UtcNow.Ticks;
@@ -28,45 +27,30 @@ namespace Garnet.cluster
             CROSSSLOT,
             TARGETNODENOTMASTER,
             INCOMPLETESLOTSRANGE,
-            SLOTOUTOFRANGE
+            SLOTOUTOFRANGE,
+            NOTMIGRATING,
+            MULTI_TRANSFER_OPTION,
         }
 
         private bool HandleCommandParsingErrors(MigrateCmdParseState mpState, string targetAddress, int targetPort, int slotMultiRef)
         {
-            ReadOnlySpan<byte> resp;
-            switch (mpState)
+            if (mpState is MigrateCmdParseState.SUCCESS)
+                return true;
+
+            var errorMessage = mpState switch
             {
-                case MigrateCmdParseState.SUCCESS:
-                    return true;
-                case MigrateCmdParseState.CLUSTERDOWN:
-                    resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes($"-ERR Cluster nodes not initialized correctly.\r\n"));
-                    break;
-                case MigrateCmdParseState.UNKNOWNTARGET:
-                    resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes($"-ERR I don't know about node ({targetAddress}:{targetPort}).\r\n"));
-                    break;
-                case MigrateCmdParseState.MULTISLOTREF:
-                    resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes($"-ERR Slot {slotMultiRef} specified multiple times\r\n"));
-                    break;
-                case MigrateCmdParseState.SLOTNOTLOCAL:
-                    resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes($"-ERR slot {slotMultiRef} not owned by current node.\r\n"));
-                    break;
-                case MigrateCmdParseState.CROSSSLOT:
-                    resp = Encoding.ASCII.GetBytes($"-CROSSSLOT Keys in request don't hash to the same slot\r\n");
-                    break;
-                case MigrateCmdParseState.TARGETNODENOTMASTER:
-                    resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes($"-ERR Cannot initiate migration, target node ({targetAddress}:{targetPort}) is not a primary.\r\n"));
-                    break;
-                case MigrateCmdParseState.INCOMPLETESLOTSRANGE:
-                    resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes("-ERR incomplete slotrange\r\n."));
-                    break;
-                case MigrateCmdParseState.SLOTOUTOFRANGE:
-                    resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes($"-ERR Slot {slotMultiRef} out of range\r\n"));
-                    break;
-                default:
-                    resp = new(Encoding.ASCII.GetBytes($"-ERR Parsing error.\r\n"));
-                    break;
-            }
-            while (!RespWriteUtils.WriteResponse(resp, ref dcurr, dend))
+                MigrateCmdParseState.CLUSTERDOWN => CmdStrings.RESP_ERR_GENERIC_CLUSTER,
+                MigrateCmdParseState.UNKNOWNTARGET => CmdStrings.RESP_ERR_GENERIC_UNKNOWN_ENDPOINT,
+                MigrateCmdParseState.MULTISLOTREF => Encoding.ASCII.GetBytes($"ERR Slot {slotMultiRef} specified multiple times."),
+                MigrateCmdParseState.SLOTNOTLOCAL => Encoding.ASCII.GetBytes($"ERR slot {slotMultiRef} not owned by current node."),
+                MigrateCmdParseState.CROSSSLOT => CmdStrings.RESP_ERR_CROSSSLOT,
+                MigrateCmdParseState.TARGETNODENOTMASTER => Encoding.ASCII.GetBytes($"ERR Cannot initiate migration, target node ({targetAddress}:{targetPort}) is not a primary."),
+                MigrateCmdParseState.INCOMPLETESLOTSRANGE => CmdStrings.RESP_ERR_GENERIC_INCOMPLETESLOTSRANGE,
+                MigrateCmdParseState.SLOTOUTOFRANGE => Encoding.ASCII.GetBytes($"ERR Slot {slotMultiRef} out of range."),
+                MigrateCmdParseState.NOTMIGRATING => CmdStrings.RESP_ERR_GENERIC_SLOTNOTMIGRATING,
+                _ => CmdStrings.RESP_ERR_GENERIC_PARSING,
+            };
+            while (!RespWriteUtils.WriteError(errorMessage, ref dcurr, dend))
                 SendAndReset();
             return false;
         }
@@ -86,7 +70,7 @@ namespace Garnet.cluster
 
             //3. Key
             byte* singleKeyPtr = null;
-            int sksize = 0;
+            var sksize = 0;
             if (!RespReadUtils.ReadPtrWithLengthHeader(ref singleKeyPtr, ref sksize, ref ptr, recvBufferPtr + bytesRead))
                 return false;
 
@@ -98,33 +82,35 @@ namespace Garnet.cluster
             if (!RespReadUtils.ReadIntWithLengthHeader(out var timeout, ref ptr, recvBufferPtr + bytesRead))
                 return false;
 
-            int args = count - 6;
-            bool copyOption = false;
-            bool replaceOption = false;
+            var args = count - 5;
+            var copyOption = false;
+            var replaceOption = false;
             string username = null;
             string passwd = null;
-            List<(long, long)> keysWithSize = null;
-            HashSet<int> slots = [];
+            Dictionary<ArgSlice, KeyMigrationStatus> keys = null;
+            HashSet<int> slots = null;
 
             ClusterConfig current = null;
             string sourceNodeId = null;
             string targetNodeId = null;
-            MigrateCmdParseState pstate = MigrateCmdParseState.CLUSTERDOWN;
-            int slotParseError = -1;
+            var pstate = MigrateCmdParseState.CLUSTERDOWN;
+            var slotParseError = -1;
+            var transferOption = TransferOption.NONE;
             if (clusterProvider.serverOptions.EnableCluster)
             {
                 pstate = MigrateCmdParseState.SUCCESS;
                 current = clusterProvider.clusterManager.CurrentConfig;
-                sourceNodeId = current.GetLocalNodeId();
+                sourceNodeId = current.LocalNodeId;
                 targetNodeId = current.GetWorkerNodeIdFromAddress(targetAddress, targetPort);
                 if (targetNodeId == null) pstate = MigrateCmdParseState.UNKNOWNTARGET;
             }
 
-            //Add single key if specified
+            // Add single key if specified
             if (sksize > 0)
             {
-                keysWithSize = [];
-                keysWithSize.Add(new(((IntPtr)singleKeyPtr).ToInt64(), sksize));
+                transferOption = TransferOption.KEYS;
+                keys = new Dictionary<ArgSlice, KeyMigrationStatus>(ArgSliceComparer.Instance);
+                keys.TryAdd(new(singleKeyPtr, sksize), KeyMigrationStatus.QUEUED);
             }
 
             while (args > 0)
@@ -133,17 +119,17 @@ namespace Garnet.cluster
                     return false;
                 args--;
 
-                if (option.ToUpper().Equals("COPY"))
+                if (option.Equals("COPY", StringComparison.OrdinalIgnoreCase))
                     copyOption = true;
-                else if (option.ToUpper().Equals("REPLACE"))
+                else if (option.Equals("REPLACE", StringComparison.OrdinalIgnoreCase))
                     replaceOption = true;
-                else if (option.ToUpper().Equals("AUTH"))
+                else if (option.Equals("AUTH", StringComparison.OrdinalIgnoreCase))
                 {
                     if (!RespReadUtils.ReadStringWithLengthHeader(out passwd, ref ptr, recvBufferPtr + bytesRead))
                         return false;
                     args--;
                 }
-                else if (option.ToUpper().Equals("AUTH2"))
+                else if (option.Equals("AUTH2", StringComparison.OrdinalIgnoreCase))
                 {
                     if (!RespReadUtils.ReadStringWithLengthHeader(out username, ref ptr, recvBufferPtr + bytesRead))
                         return false;
@@ -151,52 +137,69 @@ namespace Garnet.cluster
                         return false;
                     args -= 2;
                 }
-                else if (option.ToUpper().Equals("KEYS"))
+                else if (option.Equals("KEYS", StringComparison.OrdinalIgnoreCase))
                 {
-                    keysWithSize ??= [];
+                    slots = [];
+                    if (transferOption == TransferOption.SLOTS)
+                        pstate = MigrateCmdParseState.MULTI_TRANSFER_OPTION;
+
+                    transferOption = TransferOption.KEYS;
+                    keys = new Dictionary<ArgSlice, KeyMigrationStatus>(ArgSliceComparer.Instance);
                     while (args > 0)
                     {
                         byte* keyPtr = null;
-                        int ksize = 0;
+                        var ksize = 0;
 
                         if (!RespReadUtils.ReadPtrWithLengthHeader(ref keyPtr, ref ksize, ref ptr, recvBufferPtr + bytesRead))
                             return false;
                         args--;
 
-                        //Skip if previous error encountered
+                        // Skip if previous error encountered
                         if (pstate != MigrateCmdParseState.SUCCESS) continue;
 
-                        //Check if all keys are local R/W because we migrate keys and need to be able to delete them
-                        var slot = NumUtils.HashSlot(keyPtr, ksize);
-                        if (!current.IsLocal((ushort)slot, readCommand: false))
+                        // Check if all keys are local R/W because we migrate keys and need to be able to delete them
+                        var slot = HashSlotUtils.HashSlot(keyPtr, ksize);
+                        if (!current.IsLocal(slot, readWriteSession: false))
                         {
                             pstate = MigrateCmdParseState.SLOTNOTLOCAL;
                             continue;
                         }
 
-                        //Check if keys refer to multiple slots
+                        // Check if keys refer to multiple slots
                         if (!slots.Contains(slot) && slots.Count > 0)
                         {
                             pstate = MigrateCmdParseState.CROSSSLOT;
                             continue;
                         }
 
-                        //Add pointer of current parsed key
-                        keysWithSize.Add(new(((IntPtr)keyPtr).ToInt64(), ksize));
+                        // Check if slot is not set as MIGRATING
+                        if (!current.IsMigratingSlot(slot))
+                        {
+                            pstate = MigrateCmdParseState.NOTMIGRATING;
+                            continue;
+                        }
+
+                        // Add pointer of current parsed key
+                        if (!keys.TryAdd(new ArgSlice(keyPtr, ksize), KeyMigrationStatus.QUEUED))
+                            logger?.LogWarning($"Failed to add {{key}}", Encoding.ASCII.GetString(keyPtr, ksize));
                     }
                 }
-                else if (option.ToUpper().Equals("SLOTS"))
+                else if (option.Equals("SLOTS", StringComparison.OrdinalIgnoreCase))
                 {
+                    if (transferOption == TransferOption.KEYS)
+                        pstate = MigrateCmdParseState.MULTI_TRANSFER_OPTION;
+                    transferOption = TransferOption.SLOTS;
+                    slots = [];
                     while (args > 0)
                     {
                         if (!RespReadUtils.ReadIntWithLengthHeader(out var slot, ref ptr, recvBufferPtr + bytesRead))
                             return false;
                         args--;
 
-                        //Skip if previous error encountered
+                        // Skip if previous error encountered
                         if (pstate != MigrateCmdParseState.SUCCESS) continue;
 
-                        //Check if slot is in valid range
+                        // Check if slot is in valid range
                         if (ClusterConfig.OutOfRange(slot))
                         {
                             pstate = MigrateCmdParseState.SLOTOUTOFRANGE;
@@ -204,15 +207,15 @@ namespace Garnet.cluster
                             continue;
                         }
 
-                        //Check if slot is local and can be migrated
-                        if (!current.IsLocal((ushort)slot, readCommand: false))
+                        // Check if slot is local and can be migrated
+                        if (!current.IsLocal((ushort)slot, readWriteSession: false))
                         {
                             pstate = MigrateCmdParseState.SLOTNOTLOCAL;
                             slotParseError = slot;
                             continue;
                         }
 
-                        //add slot range and check for duplicates or overlap
+                        // Add slot range and check for duplicates or overlap
                         if (!slots.Add(slot))
                         {
                             pstate = MigrateCmdParseState.MULTISLOTREF;
@@ -221,8 +224,9 @@ namespace Garnet.cluster
                         }
                     }
                 }
-                else if (option.ToUpper().Equals("SLOTSRANGE"))
+                else if (option.Equals("SLOTSRANGE", StringComparison.OrdinalIgnoreCase))
                 {
+                    slots = [];
                     if (args == 0 || (args & 0x1) > 0)
                     {
                         pstate = MigrateCmdParseState.INCOMPLETESLOTSRANGE;
@@ -244,12 +248,12 @@ namespace Garnet.cluster
                                 return false;
                             args -= 2;
 
-                            //Skip if previous error encountered
+                            // Skip if previous error encountered
                             if (pstate != MigrateCmdParseState.SUCCESS) continue;
 
-                            for (int slot = slotStart; slot <= slotEnd; slot++)
+                            for (var slot = slotStart; slot <= slotEnd; slot++)
                             {
-                                //Check if slot is in valid range
+                                // Check if slot is in valid range
                                 if (ClusterConfig.OutOfRange(slot))
                                 {
                                     pstate = MigrateCmdParseState.SLOTOUTOFRANGE;
@@ -257,15 +261,15 @@ namespace Garnet.cluster
                                     continue;
                                 }
 
-                                //Check if slot is not owned by current node or cluster mode is not enabled
-                                if (!current.IsLocal((ushort)slot, readCommand: false))
+                                // Check if slot is not owned by current node or cluster mode is not enabled
+                                if (!current.IsLocal((ushort)slot, readWriteSession: false))
                                 {
                                     pstate = MigrateCmdParseState.SLOTNOTLOCAL;
                                     slotParseError = slot;
                                     continue;
                                 }
 
-                                //add slot range and check for duplicates or overlap
+                                // Add slot range and check for duplicates or overlap
                                 if (!slots.Add(slot))
                                 {
                                     pstate = MigrateCmdParseState.MULTISLOTREF;
@@ -278,6 +282,7 @@ namespace Garnet.cluster
                 }
             }
             readHead = (int)(ptr - recvBufferPtr);
+
             #endregion
 
             #region checkParseErrors
@@ -287,20 +292,13 @@ namespace Garnet.cluster
             if (!HandleCommandParsingErrors(pstate, targetAddress, targetPort, slotParseError))
                 return true;
 
-            // Check if session is authorized to perform migration.
-            if (!CheckACLAdminPermissions())
-            {
-                while (!RespWriteUtils.WriteResponse(CmdStrings.RESP_NOAUTH, ref dcurr, dend))
-                    SendAndReset();
-                return true;
-            }
-
             #endregion
 
-            logger?.LogDebug("MIGRATE COPY:{copyOption} REPLACE:{replaceOption} OpType:{opType}", copyOption, replaceOption, (keysWithSize != null ? "KEYS" : "SLOTS"));
+            logger?.LogDebug("MIGRATE COPY:{copyOption} REPLACE:{replaceOption} OpType:{opType}", copyOption, replaceOption, (keys != null ? "KEYS" : "SLOTS"));
 
             #region scheduleMigration
             if (!clusterProvider.migrationManager.TryAddMigrationTask(
+                this,
                 sourceNodeId,
                 targetAddress,
                 targetPort,
@@ -311,20 +309,27 @@ namespace Garnet.cluster
                 replaceOption,
                 timeout,
                 slots,
-                keysWithSize,
+                keys,
+                transferOption,
                 out var mSession))
             {
-                //Migration task could not be added due to possible conflicting migration tasks
-                var resp = new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes("-IOERR Migrate keys failed.\r\n"));
-                while (!RespWriteUtils.WriteResponse(resp, ref dcurr, dend))
+                // Migration task could not be added due to possible conflicting migration tasks
+                while (!RespWriteUtils.WriteError(CmdStrings.RESP_ERR_IOERR, ref dcurr, dend))
                     SendAndReset();
             }
             else
             {
                 //Start migration task
-                mSession.StartMigrationTask(out var resp);
-                while (!RespWriteUtils.WriteResponse(resp, ref dcurr, dend))
-                    SendAndReset();
+                if (!mSession.TryStartMigrationTask(out var errorMessage))
+                {
+                    while (!RespWriteUtils.WriteError(errorMessage, ref dcurr, dend))
+                        SendAndReset();
+                }
+                else
+                {
+                    while (!RespWriteUtils.WriteDirect(CmdStrings.RESP_OK, ref dcurr, dend))
+                        SendAndReset();
+                }
             }
 
             return true;

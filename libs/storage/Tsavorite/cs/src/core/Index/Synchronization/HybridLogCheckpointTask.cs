@@ -90,12 +90,6 @@ namespace Tsavorite.core
                         store._activeSessions.Remove(key);
                 }
             }
-
-            // Make sure previous recoverable sessions are re-checkpointed
-            foreach (var item in store.RecoverableSessions)
-            {
-                store._hybridLogCheckpoint.info.checkpointTokens.TryAdd(item.Item1, (item.Item2, item.Item3));
-            }
         }
 
         /// <inheritdoc />
@@ -105,29 +99,24 @@ namespace Tsavorite.core
         }
 
         /// <inheritdoc />
-        public virtual void OnThreadState<Key, Value, Input, Output, Context, TsavoriteSession>(
+        public virtual void OnThreadState<Key, Value, Input, Output, Context, TSessionFunctionsWrapper>(
             SystemState current,
             SystemState prev, TsavoriteKV<Key, Value> store,
             TsavoriteKV<Key, Value>.TsavoriteExecutionContext<Input, Output, Context> ctx,
-            TsavoriteSession storeSession,
+            TSessionFunctionsWrapper sessionFunctions,
             List<ValueTask> valueTasks,
             CancellationToken token = default)
-            where TsavoriteSession : ITsavoriteSession
+            where TSessionFunctionsWrapper : ISessionEpochControl
         {
-            if (current.Phase != Phase.PERSISTENCE_CALLBACK) return;
-
-            if (ctx is not null)
-            {
-                if (!ctx.prevCtx.markers[EpochPhaseIdx.CheckpointCompletionCallback])
-                {
-                    store.IssueCompletionCallback(ctx, storeSession);
-                    ctx.prevCtx.markers[EpochPhaseIdx.CheckpointCompletionCallback] = true;
-                }
-            }
+            if (current.Phase != Phase.PERSISTENCE_CALLBACK)
+                return;
 
             store.epoch.Mark(EpochPhaseIdx.CheckpointCompletionCallback, current.Version);
             if (store.epoch.CheckIsComplete(EpochPhaseIdx.CheckpointCompletionCallback, current.Version))
+            {
+                // TODO: store.CheckpointCompletionCallback();
                 store.GlobalStateMachineStep(current);
+            }
         }
     }
 
@@ -160,16 +149,16 @@ namespace Tsavorite.core
         }
 
         /// <inheritdoc />
-        public override void OnThreadState<Key, Value, Input, Output, Context, TsavoriteSession>(
+        public override void OnThreadState<Key, Value, Input, Output, Context, TSessionFunctionsWrapper>(
             SystemState current,
             SystemState prev,
             TsavoriteKV<Key, Value> store,
             TsavoriteKV<Key, Value>.TsavoriteExecutionContext<Input, Output, Context> ctx,
-            TsavoriteSession storeSession,
+            TSessionFunctionsWrapper sessionFunctions,
             List<ValueTask> valueTasks,
             CancellationToken token = default)
         {
-            base.OnThreadState(current, prev, store, ctx, storeSession, valueTasks, token);
+            base.OnThreadState(current, prev, store, ctx, sessionFunctions, valueTasks, token);
 
             if (current.Phase != Phase.WAIT_FLUSH) return;
 
@@ -226,7 +215,9 @@ namespace Tsavorite.core
                     store._hybridLogCheckpoint.snapshotFileDevice.Initialize(store.hlog.GetSegmentSize());
                     store._hybridLogCheckpoint.snapshotFileObjectLogDevice.Initialize(-1);
 
-                    store._hybridLogCheckpoint.info.snapshotStartFlushedLogicalAddress = store.hlog.FlushedUntilAddress;
+                    // If we are using a NullDevice then storage tier is not enabled and FlushedUntilAddress may be ReadOnlyAddress; get all records in memory.
+                    store._hybridLogCheckpoint.info.snapshotStartFlushedLogicalAddress = store.hlog.IsNullDevice ? store.hlog.HeadAddress : store.hlog.FlushedUntilAddress;
+
                     long startPage = store.hlog.GetPage(store._hybridLogCheckpoint.info.snapshotStartFlushedLogicalAddress);
                     long endPage = store.hlog.GetPage(store._hybridLogCheckpoint.info.finalLogicalAddress);
                     if (store._hybridLogCheckpoint.info.finalLogicalAddress >
@@ -251,7 +242,8 @@ namespace Tsavorite.core
                     break;
                 case Phase.PERSISTENCE_CALLBACK:
                     // Set actual FlushedUntil to the latest possible data in main log that is on disk
-                    store._hybridLogCheckpoint.info.flushedLogicalAddress = store.hlog.FlushedUntilAddress;
+                    // If we are using a NullDevice then storage tier is not enabled and FlushedUntilAddress may be ReadOnlyAddress; get all records in memory.
+                    store._hybridLogCheckpoint.info.flushedLogicalAddress = store.hlog.IsNullDevice ? store.hlog.HeadAddress : store.hlog.FlushedUntilAddress;
                     base.GlobalBeforeEnteringState(next, store);
                     store._lastSnapshotCheckpoint = store._hybridLogCheckpoint.Transfer();
                     break;
@@ -262,15 +254,15 @@ namespace Tsavorite.core
         }
 
         /// <inheritdoc />
-        public override void OnThreadState<Key, Value, Input, Output, Context, TsavoriteSession>(
+        public override void OnThreadState<Key, Value, Input, Output, Context, TSessionFunctionsWrapper>(
             SystemState current,
             SystemState prev, TsavoriteKV<Key, Value> store,
             TsavoriteKV<Key, Value>.TsavoriteExecutionContext<Input, Output, Context> ctx,
-            TsavoriteSession storeSession,
+            TSessionFunctionsWrapper sessionFunctions,
             List<ValueTask> valueTasks,
             CancellationToken token = default)
         {
-            base.OnThreadState(current, prev, store, ctx, storeSession, valueTasks, token);
+            base.OnThreadState(current, prev, store, ctx, sessionFunctions, valueTasks, token);
 
             if (current.Phase != Phase.WAIT_FLUSH) return;
 
@@ -356,15 +348,15 @@ namespace Tsavorite.core
         }
 
         /// <inheritdoc />
-        public override void OnThreadState<Key, Value, Input, Output, Context, TsavoriteSession>(
+        public override void OnThreadState<Key, Value, Input, Output, Context, TSessionFunctionsWrapper>(
             SystemState current,
             SystemState prev, TsavoriteKV<Key, Value> store,
             TsavoriteKV<Key, Value>.TsavoriteExecutionContext<Input, Output, Context> ctx,
-            TsavoriteSession storeSession,
+            TSessionFunctionsWrapper sessionFunctions,
             List<ValueTask> valueTasks,
             CancellationToken token = default)
         {
-            base.OnThreadState(current, prev, store, ctx, storeSession, valueTasks, token);
+            base.OnThreadState(current, prev, store, ctx, sessionFunctions, valueTasks, token);
 
             if (current.Phase != Phase.WAIT_FLUSH) return;
 

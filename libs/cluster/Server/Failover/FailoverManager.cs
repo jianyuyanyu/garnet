@@ -2,29 +2,20 @@
 // Licensed under the MIT license.
 
 using System;
+using System.Threading;
 using System.Threading.Tasks;
 using Garnet.common;
-using Garnet.server;
 using Microsoft.Extensions.Logging;
 
 namespace Garnet.cluster
 {
-    internal class FailoverManager : IDisposable
+    internal sealed class FailoverManager(ClusterProvider clusterProvider, ILogger logger = null) : IDisposable
     {
         FailoverSession currentFailoverSession = null;
-        readonly ClusterProvider clusterProvider;
-        readonly TimeSpan clusterTimeout;
-        readonly ILogger logger;
+        readonly ClusterProvider clusterProvider = clusterProvider;
+        readonly TimeSpan clusterTimeout = clusterProvider.serverOptions.ClusterTimeout <= 0 ? Timeout.InfiniteTimeSpan : TimeSpan.FromSeconds(clusterProvider.serverOptions.ClusterTimeout);
+        readonly ILogger logger = logger;
         private SingleWriterMultiReaderLock failoverTaskLock;
-
-        public FailoverManager(ClusterProvider clusterProvider, GarnetServerOptions opts, TimeSpan clusterTimeout, ILoggerFactory loggerFactory)
-        {
-            this.clusterProvider = clusterProvider;
-            this.clusterTimeout = clusterTimeout;
-
-            string address = opts.Address ?? StoreWrapper.GetIp();
-            this.logger = loggerFactory?.CreateLogger($"ClusterManager-{address}:{opts.Port}");
-        }
 
         public void Dispose()
         {
@@ -50,7 +41,7 @@ namespace Garnet.cluster
         /// <returns></returns>
         public string GetFailoverStatus()
         {
-            var status = currentFailoverSession?.GetStatus;
+            var status = currentFailoverSession?.status;
             return status.HasValue ? FailoverUtils.GetFailoverStatus(status) :
                 FailoverUtils.GetFailoverStatus(FailoverStatus.NO_FAILOVER);
         }
@@ -66,29 +57,19 @@ namespace Garnet.cluster
             if (!failoverTaskLock.TryWriteLock())
                 return false;
 
-            var (address, port) = clusterProvider.clusterManager.CurrentConfig.GetLocalNodePrimaryAddress();
-            if (address == null)
-            {
-                failoverTaskLock.WriteUnlock();
-                return false;
-            }
-
             currentFailoverSession = new FailoverSession(
                 clusterProvider,
                 option,
                 clusterTimeout: clusterTimeout,
                 failoverTimeout: failoverTimeout,
-                hostAddress: address,
-                hostPort: port,
+                isReplicaSession: true,
                 logger: logger);
-            Task.Run(ReplicaFailoverAsyncTask);
+            _ = Task.Run(async () =>
+            {
+                _ = await currentFailoverSession.BeginAsyncReplicaFailover();
+                Reset();
+            });
             return true;
-        }
-
-        private async void ReplicaFailoverAsyncTask()
-        {
-            await currentFailoverSession.BeginAsyncReplicaFailover();
-            Reset();
         }
 
         /// <summary>
@@ -105,21 +86,20 @@ namespace Garnet.cluster
                 return false;
 
             currentFailoverSession = new FailoverSession(
-                clusterProvider,
-                option,
-                clusterTimeout,
-                timeout,
+                clusterProvider: clusterProvider,
+                option: option,
+                clusterTimeout: clusterTimeout,
+                failoverTimeout: timeout,
+                isReplicaSession: false,
                 hostAddress: replicaAddress,
                 hostPort: replicaPort,
                 logger: logger);
-            Task.Run(PrimaryFailoverAsyncTask);
+            _ = Task.Run(async () =>
+            {
+                _ = await currentFailoverSession.BeginAsyncPrimaryFailover();
+                Reset();
+            });
             return true;
-        }
-
-        private async void PrimaryFailoverAsyncTask()
-        {
-            await currentFailoverSession.BeginAsyncPrimaryFailover();
-            Reset();
         }
     }
 }

@@ -8,7 +8,7 @@ using static Tsavorite.core.Utility;
 namespace Tsavorite.core
 {
     /// <summary>
-    /// Callback functions for SpanByte Key, Value, Input; SpanByteAndMemory Output; and specified Context
+    /// Callback functions for <see cref="SpanByte"/> Key, Value, Input; <see cref="SpanByteAndMemory"/> Output; and specified <typeparamref name="Context"/>
     /// </summary>
     public class SpanByteFunctions<Context> : SpanByteFunctions<SpanByteAndMemory, Context>
     {
@@ -36,23 +36,30 @@ namespace Tsavorite.core
             value.CopyTo(ref dst, memoryPool);
             return true;
         }
+
+        /// <inheritdoc />
+        public override void ConvertOutputToHeap(ref SpanByte input, ref SpanByteAndMemory output)
+        {
+            // Currently the default is a no-op; the derived class inspects 'input' to decide whether to ConvertToHeap().
+            //output.ConvertToHeap();
+        }
     }
 
     /// <summary>
-    /// Callback functions for SpanByte key, value, input; specified Output and Context
+    /// Callback functions for <see cref="SpanByte"/> key, value; specified <typeparamref name="Input"/>, <typeparamref name="Output"/>, and <typeparamref name="Context"/>
     /// </summary>
-    public class SpanByteFunctions<Output, Context> : FunctionsBase<SpanByte, SpanByte, SpanByte, Output, Context>
+    public class SpanByteFunctions<Input, Output, Context> : SessionFunctionsBase<SpanByte, SpanByte, Input, Output, Context>
     {
         /// <inheritdoc />
-        public override bool SingleWriter(ref SpanByte key, ref SpanByte input, ref SpanByte src, ref SpanByte dst, ref Output output, ref UpsertInfo upsertInfo, WriteReason reason, ref RecordInfo recordInfo)
+        public override bool SingleWriter(ref SpanByte key, ref Input input, ref SpanByte src, ref SpanByte dst, ref Output output, ref UpsertInfo upsertInfo, WriteReason reason, ref RecordInfo recordInfo)
             => DoSafeCopy(ref src, ref dst, ref upsertInfo, ref recordInfo);
 
         /// <inheritdoc />
-        public override bool ConcurrentWriter(ref SpanByte key, ref SpanByte input, ref SpanByte src, ref SpanByte dst, ref Output output, ref UpsertInfo upsertInfo, ref RecordInfo recordInfo)
+        public override bool ConcurrentWriter(ref SpanByte key, ref Input input, ref SpanByte src, ref SpanByte dst, ref Output output, ref UpsertInfo upsertInfo, ref RecordInfo recordInfo)
             => DoSafeCopy(ref src, ref dst, ref upsertInfo, ref recordInfo);
 
         /// <summary>
-        /// Utility function for SpanByte copying, Upsert version.
+        /// Utility function for <see cref="SpanByte"/> copying, Upsert version.
         /// </summary>
         public static bool DoSafeCopy(ref SpanByte src, ref SpanByte dst, ref UpsertInfo upsertInfo, ref RecordInfo recordInfo)
         {
@@ -72,31 +79,8 @@ namespace Tsavorite.core
             return result;
         }
 
-        /// <inheritdoc/>
-        public override bool InitialUpdater(ref SpanByte key, ref SpanByte input, ref SpanByte value, ref Output output, ref RMWInfo rmwInfo, ref RecordInfo recordInfo)
-            => DoSafeCopy(ref input, ref value, ref rmwInfo, ref recordInfo);
-
-        /// <inheritdoc/>
-        public override bool CopyUpdater(ref SpanByte key, ref SpanByte input, ref SpanByte oldValue, ref SpanByte newValue, ref Output output, ref RMWInfo rmwInfo, ref RecordInfo recordInfo)
-            => DoSafeCopy(ref oldValue, ref newValue, ref rmwInfo, ref recordInfo);
-
-        /// <inheritdoc/>
-        // The default implementation of IPU simply writes input to destination, if there is space
-        public override bool InPlaceUpdater(ref SpanByte key, ref SpanByte input, ref SpanByte value, ref Output output, ref RMWInfo rmwInfo, ref RecordInfo recordInfo)
-            => DoSafeCopy(ref input, ref value, ref rmwInfo, ref recordInfo);
-
         /// <summary>
-        /// Length of resulting object when doing RMW with given value and input. Here we set the length
-        /// to the max of input and old value lengths. You can provide a custom implementation for other cases.
-        /// </summary>
-        public override int GetRMWModifiedValueLength(ref SpanByte t, ref SpanByte input)
-            => sizeof(int) + (t.Length > input.Length ? t.Length : input.Length);
-
-        /// <inheritdoc/>
-        public override int GetRMWInitialValueLength(ref SpanByte input) => input.TotalSize;
-
-        /// <summary>
-        /// Utility function for SpanByte copying, RMW version.
+        /// Utility function for <see cref="SpanByte"/> copying, RMW version.
         /// </summary>
         public static bool DoSafeCopy(ref SpanByte src, ref SpanByte dst, ref RMWInfo rmwInfo, ref RecordInfo recordInfo)
         {
@@ -145,5 +129,34 @@ namespace Tsavorite.core
             // NewKeySize is (newKey).TotalSize.
             key.Length = newKeySize - sizeof(int);
         }
+    }
+
+    /// <summary>
+    /// Callback functions for <see cref="SpanByte"/> key, value, input; specified <typeparamref name="Output"/> and <typeparamref name="Context"/>
+    /// </summary>
+    public class SpanByteFunctions<Output, Context> : SpanByteFunctions<SpanByte, Output, Context>
+    {
+        /// <inheritdoc/>
+        public override bool InitialUpdater(ref SpanByte key, ref SpanByte input, ref SpanByte value, ref Output output, ref RMWInfo rmwInfo, ref RecordInfo recordInfo)
+            => DoSafeCopy(ref input, ref value, ref rmwInfo, ref recordInfo);
+
+        /// <inheritdoc/>
+        public override bool CopyUpdater(ref SpanByte key, ref SpanByte input, ref SpanByte oldValue, ref SpanByte newValue, ref Output output, ref RMWInfo rmwInfo, ref RecordInfo recordInfo)
+            => DoSafeCopy(ref oldValue, ref newValue, ref rmwInfo, ref recordInfo);
+
+        /// <inheritdoc/>
+        // The default implementation of IPU simply writes input to destination, if there is space
+        public override bool InPlaceUpdater(ref SpanByte key, ref SpanByte input, ref SpanByte value, ref Output output, ref RMWInfo rmwInfo, ref RecordInfo recordInfo)
+            => DoSafeCopy(ref input, ref value, ref rmwInfo, ref recordInfo);
+
+        /// <summary>
+        /// Length of resulting object when doing RMW with given value and input. Here we set the length
+        /// to the max of input and old value lengths. You can provide a custom implementation for other cases.
+        /// </summary>
+        public override int GetRMWModifiedValueLength(ref SpanByte t, ref SpanByte input)
+            => sizeof(int) + (t.Length > input.Length ? t.Length : input.Length);
+
+        /// <inheritdoc/>
+        public override int GetRMWInitialValueLength(ref SpanByte input) => input.TotalSize;
     }
 }

@@ -2,16 +2,19 @@
 // Licensed under the MIT license.
 
 using System;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
-using Garnet.common;
 using Tsavorite.core;
 
 namespace Garnet.server
 {
     /// <summary>
-    /// Slice of Key
+    /// Represents contiguous region of arbitrary _pinned_ memory.
     /// </summary>
+    /// <remarks>
+    /// SAFETY: This type is used to represent arguments that are assumed to point to pinned memory.
+    /// </remarks>
     [StructLayout(LayoutKind.Explicit, Size = 12)]
     public unsafe struct ArgSlice
     {
@@ -42,35 +45,51 @@ namespace Garnet.server
         /// <summary>
         /// Get length of ArgSlice
         /// </summary>
-        public int Length => length;
+        public readonly int Length => length;
 
         /// <summary>
         /// Get slice as ReadOnlySpan
         /// </summary>
-        public ReadOnlySpan<byte> ReadOnlySpan => new(ptr, length);
+        public readonly ReadOnlySpan<byte> ReadOnlySpan => new(ptr, length);
 
         /// <summary>
         /// Get slice as Span
         /// </summary>
-        public Span<byte> Span => new(ptr, length);
+        public readonly Span<byte> Span => new(ptr, length);
 
         /// <summary>
         /// Get slice as SpanByte
         /// </summary>
-        public SpanByte SpanByte => SpanByte.FromPointer(ptr, length);
+        public readonly SpanByte SpanByte => new(length, (nint)ptr);
 
         /// <summary>
-        /// Get slice as byte array
+        /// Copies the contents of this slice into a new array.
         /// </summary>
-        public byte[] Bytes => ReadOnlySpan.ToArray();
+        public readonly byte[] ToArray() => ReadOnlySpan.ToArray();
 
         /// <summary>
-        /// Interpret ArgSlice as a long number expressed in (decimal) digits
+        /// Decodes the contents of this slice as ASCII into a new string.
         /// </summary>
-        public long AsLongDigits => NumUtils.BytesToLong(length, ptr);
-
-        /// <inheritdoc />
-        public override string ToString()
+        /// <returns>A string ASCII decoded string from the slice.</returns>
+        public override readonly string ToString()
             => Encoding.ASCII.GetString(ReadOnlySpan);
+
+        /// <summary>
+        /// Create a <see cref="ArgSlice"/> from the given <paramref name="span"/>.
+        /// </summary>
+        /// <remarks>
+        /// SAFETY: The <paramref name="span"/> MUST point to pinned memory.
+        /// </remarks>
+        internal static ArgSlice FromPinnedSpan(ReadOnlySpan<byte> span)
+        {
+            return new ArgSlice((byte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(span)), span.Length);
+        }
+
+        /// <summary>
+        /// Check for equality to the provided argSlice
+        /// </summary>
+        /// <param name="argSlice"></param>
+        /// <returns></returns>
+        public readonly bool Equals(ArgSlice argSlice) => argSlice.Span.SequenceEqual(Span);
     }
 }

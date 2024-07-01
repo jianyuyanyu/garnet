@@ -1,6 +1,7 @@
 ﻿// Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
+using System.IO;
 using NUnit.Framework;
 using Tsavorite.core;
 using static Tsavorite.test.TestUtils;
@@ -13,15 +14,12 @@ namespace Tsavorite.test
         private TsavoriteKV<string, string> store;
         private ClientSession<string, string, string, string, Empty, MyFuncs> session;
         private IDevice log, objlog;
-        private string path;
 
         [SetUp]
         public void Setup()
         {
-            path = MethodTestDir + "/";
-
             // Clean up log files from previous test runs in case they weren't cleaned up
-            DeleteDirectory(path, wait: true);
+            DeleteDirectory(MethodTestDir, wait: true);
         }
 
         [TearDown]
@@ -36,7 +34,7 @@ namespace Tsavorite.test
             objlog?.Dispose();
             objlog = null;
 
-            DeleteDirectory(path);
+            DeleteDirectory(MethodTestDir);
         }
 
         [Test]
@@ -44,8 +42,8 @@ namespace Tsavorite.test
         [Category("Smoke")]
         public void StringBasicTest([Values] DeviceType deviceType)
         {
-            string logfilename = path + "GenericStringTests" + deviceType.ToString() + ".log";
-            string objlogfilename = path + "GenericStringTests" + deviceType.ToString() + ".obj.log";
+            string logfilename = Path.Join(MethodTestDir, "GenericStringTests" + deviceType.ToString() + ".log");
+            string objlogfilename = Path.Join(MethodTestDir, "GenericStringTests" + deviceType.ToString() + ".obj.log");
 
             log = CreateTestDevice(deviceType, logfilename);
             objlog = CreateTestDevice(deviceType, objlogfilename);
@@ -56,15 +54,16 @@ namespace Tsavorite.test
                     );
 
             session = store.NewSession<string, string, Empty, MyFuncs>(new MyFuncs());
+            var bContext = session.BasicContext;
 
             const int totalRecords = 200;
             for (int i = 0; i < totalRecords; i++)
             {
                 var _key = $"{i}";
                 var _value = $"{i}"; ;
-                session.Upsert(ref _key, ref _value, Empty.Default, 0);
+                bContext.Upsert(ref _key, ref _value, Empty.Default);
             }
-            session.CompletePending(true);
+            bContext.CompletePending(true);
             Assert.AreEqual(totalRecords, store.EntryCount);
 
             for (int i = 0; i < totalRecords; i++)
@@ -74,10 +73,10 @@ namespace Tsavorite.test
                 var key = $"{i}";
                 var value = $"{i}";
 
-                var status = session.Read(ref key, ref input, ref output, Empty.Default, 0);
+                var status = bContext.Read(ref key, ref input, ref output, Empty.Default);
                 if (status.IsPending)
                 {
-                    session.CompletePendingWithOutputs(out var outputs, wait: true);
+                    bContext.CompletePendingWithOutputs(out var outputs, wait: true);
                     (status, output) = GetSinglePendingResult(outputs);
                 }
                 Assert.IsTrue(status.Found);
@@ -85,7 +84,7 @@ namespace Tsavorite.test
             }
         }
 
-        class MyFuncs : SimpleFunctions<string, string>
+        class MyFuncs : SimpleSimpleFunctions<string, string>
         {
             public override void ReadCompletionCallback(ref string key, ref string input, ref string output, Empty ctx, Status status, RecordMetadata recordMetadata)
             {

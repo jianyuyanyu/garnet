@@ -3,7 +3,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Text;
 using Garnet.common;
 using Microsoft.Extensions.Logging;
 
@@ -21,20 +20,18 @@ namespace Garnet.server
         {
             if (txnManager.state != TxnState.None)
             {
-                while (!RespWriteUtils.WriteResponse(CmdStrings.RESP_NESTED_MULTI, ref dcurr, dend))
+                while (!RespWriteUtils.WriteError(CmdStrings.RESP_ERR_GENERIC_NESTED_MULTI, ref dcurr, dend))
                     SendAndReset();
                 txnManager.Abort();
-                readHead += 15;
                 return true;
             }
             txnManager.txnStartHead = readHead;
-            readHead += 15;
             txnManager.state = TxnState.Started;
             txnManager.operationCntTxn = 0;
             //Keep track of ptr for key verification when cluster mode is enabled
             txnManager.saveKeyRecvBufferPtr = recvBufferPtr;
 
-            while (!RespWriteUtils.WriteResponse(CmdStrings.RESP_OK, ref dcurr, dend))
+            while (!RespWriteUtils.WriteDirect(CmdStrings.RESP_OK, ref dcurr, dend))
                 SendAndReset();
             return true;
         }
@@ -45,32 +42,30 @@ namespace Garnet.server
             if (txnManager.state == TxnState.Running)
             {
                 txnManager.Commit();
-                readHead += 14;
                 return true;
 
             }
             // Abort and reset the transaction 
             else if (txnManager.state == TxnState.Aborted)
             {
-                while (!RespWriteUtils.WriteResponse(CmdStrings.RESP_EXEC_ABORT, ref dcurr, dend))
+                while (!RespWriteUtils.WriteError(CmdStrings.RESP_ERR_EXEC_ABORT, ref dcurr, dend))
                     SendAndReset();
                 txnManager.Reset(false);
-                readHead += 14;
                 return true;
             }
             // start running transaction and setting readHead to first operation
             else if (txnManager.state == TxnState.Started)
             {
-                var _origReadHead = readHead;
-                readHead = txnManager.txnStartHead + 15;
+                var _origReadHead = endReadHead;
+                endReadHead = txnManager.txnStartHead;
 
                 txnManager.GetKeysForValidation(recvBufferPtr, out var keys, out int keyCount, out bool readOnly);
-                if (NetworkKeyArraySlotVerify(ref keys, readOnly, keyCount))
+                if (NetworkKeyArraySlotVerify(keys, readOnly, keyCount))
                 {
                     logger?.LogWarning("Failed CheckClusterTxnKeys");
                     txnManager.Reset(false);
                     txnManager.watchContainer.Reset();
-                    readHead = _origReadHead + 14;
+                    endReadHead = _origReadHead;
                     return true;
                 }
 
@@ -83,7 +78,7 @@ namespace Garnet.server
                 }
                 else
                 {
-                    readHead = _origReadHead + 14;
+                    endReadHead = _origReadHead;
                     while (!RespWriteUtils.WriteNull(ref dcurr, dend))
                         SendAndReset();
                 }
@@ -91,9 +86,8 @@ namespace Garnet.server
                 return true;
             }
             // EXEC without MULTI command
-            while (!RespWriteUtils.WriteResponse(CmdStrings.RESP_EXEC_WO_MULTI, ref dcurr, dend))
+            while (!RespWriteUtils.WriteError(CmdStrings.RESP_ERR_GENERIC_EXEC_WO_MULTI, ref dcurr, dend))
                 SendAndReset();
-            readHead += 14;
             return true;
 
         }
@@ -103,105 +97,60 @@ namespace Garnet.server
         /// </summary>
         private bool NetworkSKIP(RespCommand cmd)
         {
-            var tmp = recvBufferPtr + readHead;
-            if (!RespReadUtils.ReadArrayLength(out int count, ref tmp, recvBufferPtr + bytesRead))
-                return false;
-            readHead += (int)(tmp - (recvBufferPtr + readHead));
-            ReadOnlySpan<byte> bufSpan = new ReadOnlySpan<byte>(recvBufferPtr, bytesRead);
-
-            byte subCommand = 0;
-            if (cmd == RespCommand.NONE)
+            // Retrieve the meta-data for the command to do basic sanity checking for command arguments
+            if (!RespCommandsInfo.TryGetRespCommandInfo(cmd, out var commandInfo, txnOnly: true, logger))
             {
-                (cmd, subCommand) = FastParseArrayCommand(count, recvBufferPtr + readHead);
-
-                if (cmd == RespCommand.NONE)
-                    (cmd, subCommand) = ParseAdminCommands();
-            }
-
-            if (cmd == RespCommand.NONE)
-            {
-                // Check if we received an entire command
-                GetCommand(bufSpan, out bool success1);
-                if (!success1) return false;
-
-                if (cmd == RespCommand.NONE)
-                {
-                    if (!DrainCommands(bufSpan, count - 1))
-                        return false;
-
-                    // We got the entire command, but it is not a basic or array command
-                    while (!RespWriteUtils.WriteResponse(CmdStrings.RESP_ERR, ref dcurr, dend))
-                        SendAndReset();
-                    txnManager.Abort();
-
-                    return true;
-                }
-            }
-
-            // Skip the command itself
-            GetCommand(bufSpan, out bool success);
-            if (!success)
-                return false;
-
-            RespCommandsInfo commandInfo = RespCommandsInfo.findCommand(cmd, subCommand);
-            if (commandInfo == null)
-            {
-                while (!RespWriteUtils.WriteResponse(CmdStrings.RESP_ERR, ref dcurr, dend))
+                while (!RespWriteUtils.WriteError(CmdStrings.RESP_ERR_GENERIC_UNK_CMD, ref dcurr, dend))
                     SendAndReset();
                 txnManager.Abort();
-                if (!DrainCommands(bufSpan, count - 1))
-                    return false;
                 return true;
             }
 
-            int abs_arity = commandInfo.arity > 0 ? commandInfo.arity : -commandInfo.arity;
-            // Cheking the mininum arity || exact arity 
-            bool arity_check = commandInfo.arity < 0 && count < abs_arity || commandInfo.arity > 0 && count != commandInfo.arity;
+            // Check if input is valid and abort if necessary
+            // NOTE: Negative arity means it's an expected minimum of args. Positive means exact.
+            int count = parseState.count;
+            var arity = commandInfo.Arity > 0 ? commandInfo.Arity - 1 : commandInfo.Arity + 1;
+            bool invalidNumArgs = arity > 0 ? count != (arity) : count < -arity;
+
             // Watch not allowed during TXN
-            bool is_watch = (commandInfo.command == RespCommand.WATCH || commandInfo.command == RespCommand.WATCHMS || commandInfo.command == RespCommand.WATCHOS);
-            if (arity_check || is_watch)
+            bool isWatch = commandInfo.Command == RespCommand.WATCH || commandInfo.Command == RespCommand.WATCH_MS || commandInfo.Command == RespCommand.WATCH_OS;
+
+            if (invalidNumArgs || isWatch)
             {
-                if (is_watch)
+                if (isWatch)
                 {
-                    while (!RespWriteUtils.WriteResponse(CmdStrings.RESP_WATCH_IN_MULTI, ref dcurr, dend))
+                    while (!RespWriteUtils.WriteError(CmdStrings.RESP_ERR_GENERIC_WATCH_IN_MULTI, ref dcurr, dend))
                         SendAndReset();
                 }
                 else
                 {
-                    string err = string.Format(CmdStrings.ErrMissingParam, commandInfo.nameStr);
-                    while (!RespWriteUtils.WriteResponse(new ReadOnlySpan<byte>(Encoding.ASCII.GetBytes(err)), ref dcurr, dend))
+                    string err = string.Format(CmdStrings.GenericErrWrongNumArgs, commandInfo.Name);
+                    while (!RespWriteUtils.WriteError(err, ref dcurr, dend))
                         SendAndReset();
                     txnManager.Abort();
                 }
-                if (!DrainCommands(bufSpan, count - 1))
-                    return false;
+
                 return true;
             }
 
             // Get and add keys to txn key list
-            int skipped = txnManager.GetKeys(commandInfo.command, count, out ReadOnlySpan<byte> error, subCommand);
+            int skipped = txnManager.GetKeys(cmd, count, out ReadOnlySpan<byte> error);
 
             if (skipped < 0)
             {
                 // We ran out of data in network buffer, let caller handler it
                 if (skipped == -2) return false;
 
-                // Unsupported command
-                while (!RespWriteUtils.WriteResponse(error, ref dcurr, dend))
+                // We found an unsupported command, abort
+                while (!RespWriteUtils.WriteError(error, ref dcurr, dend))
                     SendAndReset();
+
                 txnManager.Abort();
-                if (!DrainCommands(bufSpan, count - 1))
-                    return false;
+
                 return true;
             }
 
-            for (int i = skipped; i < count; i++)
-            {
-                GetCommand(bufSpan, out success);
-                if (!success) return false;
-            }
-
-            while (!RespWriteUtils.WriteResponse(CmdStrings.RESP_QUEUED, ref dcurr, dend))
+            while (!RespWriteUtils.WriteDirect(CmdStrings.RESP_QUEUED, ref dcurr, dend))
                 SendAndReset();
 
             txnManager.operationCntTxn++;
@@ -213,95 +162,106 @@ namespace Garnet.server
         /// </summary>
         private bool NetworkDISCARD()
         {
-            readHead += 17;
             if (txnManager.state == TxnState.None)
             {
-                while (!RespWriteUtils.WriteResponse(CmdStrings.RESP_DISCARD_WO_MULTI, ref dcurr, dend))
+                while (!RespWriteUtils.WriteError(CmdStrings.RESP_ERR_GENERIC_DISCARD_WO_MULTI, ref dcurr, dend))
                     SendAndReset();
                 return true;
             }
-            while (!RespWriteUtils.WriteResponse(CmdStrings.RESP_OK, ref dcurr, dend))
+            while (!RespWriteUtils.WriteDirect(CmdStrings.RESP_OK, ref dcurr, dend))
                 SendAndReset();
             txnManager.Reset(false);
             return true;
         }
 
         /// <summary>
-        /// Watch
+        /// Common implementation of various WATCH commands and subcommands.
         /// </summary>
-        private bool NetworkWATCH(int count, byte* ptr, StoreType type = StoreType.All)
+        /// <param name="count">Remaining keys in the command buffer.</param>
+        /// <param name="type">Store type that's bein gwatch</param>
+        /// <returns>true if parsing succeeded correctly, false if not all tokens could be consumed and further processing is necessary.</returns>
+        private bool CommonWATCH(int count, StoreType type)
         {
-            GetCommandAsArgSlice(out bool success);
-            if (!success) return false;
-
-            if (type != StoreType.All)
+            // Have to provide at least one key
+            if (count == 0)
             {
-                GetCommandAsArgSlice(out success);
+                while (!RespWriteUtils.WriteError(CmdStrings.GenericErrWrongNumArgs, ref dcurr, dend))
+                    SendAndReset();
+
+                return true;
+            }
+
+            List<ArgSlice> keys = new();
+
+            for (int c = 0; c < count; c++)
+            {
+                var nextKey = GetCommandAsArgSlice(out bool success);
                 if (!success) return false;
-                count--;
+
+                keys.Add(nextKey);
             }
 
-
-            if (count > 2)
+            foreach (var toWatch in keys)
             {
-                List<ArgSlice> keys = new();
-
-                for (int c = 0; c < count - 1; c++)
-                {
-                    var key = GetCommandAsArgSlice(out success);
-                    if (!success) return false;
-                    keys.Add(key);
-                }
-
-                foreach (var key in keys)
-                    txnManager.Watch(key, type);
-            }
-            else
-            {
-                for (int c = 0; c < count - 1; c++)
-                {
-                    var key = GetCommandAsArgSlice(out success);
-                    if (!success) return false;
-                    txnManager.Watch(key, type);
-                }
+                txnManager.Watch(toWatch, type);
             }
 
-            while (!RespWriteUtils.WriteResponse(CmdStrings.RESP_OK, ref dcurr, dend))
+            while (!RespWriteUtils.WriteDirect(CmdStrings.RESP_OK, ref dcurr, dend))
                 SendAndReset();
+
             return true;
         }
+
+        /// <summary>
+        /// WATCH MS key [key ..]
+        /// </summary>
+        private bool NetworkWATCH_MS(int count)
+        => CommonWATCH(count, StoreType.Main);
+
+        /// <summary>
+        /// WATCH OS key [key ..]
+        /// </summary>
+        private bool NetworkWATCH_OS(int count)
+        => CommonWATCH(count, StoreType.Object);
+
+        /// <summary>
+        /// Watch key [key ...]
+        /// </summary>
+        private bool NetworkWATCH(int count)
+        => CommonWATCH(count, StoreType.All);
 
         /// <summary>
         /// UNWATCH
         /// </summary>
         private bool NetworkUNWATCH()
         {
-            readHead += 17;
             if (txnManager.state == TxnState.None)
             {
                 txnManager.watchContainer.Reset();
             }
-            while (!RespWriteUtils.WriteResponse(CmdStrings.RESP_OK, ref dcurr, dend))
+            while (!RespWriteUtils.WriteDirect(CmdStrings.RESP_OK, ref dcurr, dend))
                 SendAndReset();
             return true;
         }
 
         private bool NetworkRUNTXPFast(byte* ptr)
         {
-            int count = *(ptr + 1) - '0';
-            ptr += 16;
-            return NetworkRUNTXP(ptr, count);
+            int count = *(ptr - 16 + 1) - '0';
+            return NetworkRUNTXP(count, ptr);
         }
 
-        private bool NetworkRUNTXP(byte* ptr, int count)
+        private bool NetworkRUNTXP(int count, byte* ptr)
         {
+            if (count < 1)
+                return AbortWithWrongNumberOfArguments(nameof(RespCommand.RUNTXP), count);
+
             if (!RespReadUtils.ReadIntWithLengthHeader(out int txid, ref ptr, recvBufferPtr + bytesRead))
                 return false;
 
             byte* start = ptr;
 
             // Verify all args available
-            for (int i = 0; i < count - 2; i++)
+            for (int i = 0; i < count - 1; i++)
             {
                 byte* result = default;
                 int len = 0;
@@ -312,15 +272,32 @@ namespace Garnet.server
             // Shift read head
             readHead = (int)(ptr - recvBufferPtr);
 
+            CustomTransactionProcedure proc;
+            int numParams;
 
-            var (proc, numParams) = customCommandManagerSession.GetCustomTransactionProcedure(txid, txnManager, scratchBufferManager);
-            if (count - 2 == numParams)
+            try
+            {
+                (proc, numParams) = customCommandManagerSession.GetCustomTransactionProcedure(txid, txnManager, scratchBufferManager);
+            }
+            catch (Exception e)
+            {
+                logger?.LogError(e, "Getting customer transaction in RUNTXP failed");
+
+                while (!RespWriteUtils.WriteError(CmdStrings.RESP_ERR_NO_TRANSACTION_PROCEDURE, ref dcurr, dend))
+                    SendAndReset();
+
+                return true;
+            }
+
+            if (count - 1 == numParams)
             {
                 TryTransactionProc((byte)txid, start, ptr, proc);
             }
             else
             {
-                while (!RespWriteUtils.WriteDirect(Encoding.ASCII.GetBytes($"-ERR Invalid number of parameters to stored proc {txid}, expected {numParams}, actual {count - 2}\r\n"), ref dcurr, dend))
+                while (!RespWriteUtils.WriteError(
+                           string.Format(CmdStrings.GenericErrWrongNumArgsTxn, txid, numParams, count - 1), ref dcurr,
+                           dend))
                     SendAndReset();
                 return true;
             }

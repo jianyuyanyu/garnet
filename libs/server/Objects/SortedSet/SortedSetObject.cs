@@ -43,6 +43,7 @@ namespace Garnet.server
         ZRANDMEMBER,
         ZDIFF,
         ZSCAN,
+        ZMSCORE
     }
 
     /// <summary>
@@ -71,11 +72,8 @@ namespace Garnet.server
     /// </summary>
     public partial class SortedSetObject : GarnetObjectBase
     {
-        readonly SortedSet<(double, byte[])> sortedSet;
-        readonly Dictionary<byte[], double> sortedSetDict;
-
-        static readonly SortedSetComparer sortedSetComparer = new();
-        static readonly ByteArrayComparer byteArrayComparer = new();
+        private readonly SortedSet<(double Score, byte[] Element)> sortedSet;
+        private readonly Dictionary<byte[], double> sortedSetDict;
 
         /// <summary>
         /// Constructor
@@ -83,8 +81,8 @@ namespace Garnet.server
         public SortedSetObject(long expiration = 0)
             : base(expiration, MemoryUtils.SortedSetOverhead + MemoryUtils.DictionaryOverhead)
         {
-            sortedSet = new(sortedSetComparer);
-            sortedSetDict = new Dictionary<byte[], double>(byteArrayComparer);
+            sortedSet = new(SortedSetComparer.Instance);
+            sortedSetDict = new Dictionary<byte[], double>(ByteArrayComparer.Instance);
         }
 
         /// <summary>
@@ -93,8 +91,8 @@ namespace Garnet.server
         public SortedSetObject(BinaryReader reader)
             : base(reader, MemoryUtils.SortedSetOverhead + MemoryUtils.DictionaryOverhead)
         {
-            sortedSet = new(sortedSetComparer);
-            sortedSetDict = new Dictionary<byte[], double>(byteArrayComparer);
+            sortedSet = new(SortedSetComparer.Instance);
+            sortedSetDict = new Dictionary<byte[], double>(ByteArrayComparer.Instance);
 
             int count = reader.ReadInt32();
             for (int i = 0; i < count; i++)
@@ -179,14 +177,22 @@ namespace Garnet.server
         public override GarnetObjectBase Clone() => new SortedSetObject(sortedSet, sortedSetDict, Expiration, Size);
 
         /// <inheritdoc />
-        public override unsafe bool Operate(ref SpanByte input, ref SpanByteAndMemory output, out long sizeChange)
+        public override unsafe bool Operate(ref SpanByte input, ref SpanByteAndMemory output, out long sizeChange, out bool removeKey)
         {
             fixed (byte* _input = input.AsSpan())
             fixed (byte* _output = output.SpanByte.AsSpan())
             {
                 var header = (RespInputHeader*)_input;
-                Debug.Assert(header->type == GarnetObjectType.SortedSet);
-                long previouseSize = this.Size;
+                if (header->type != GarnetObjectType.SortedSet)
+                {
+                    // Indicates an incorrect type of key
+                    output.Length = 0;
+                    sizeChange = 0;
+                    removeKey = false;
+                    return true;
+                }
+
+                long prevSize = this.Size;
                 switch (header->SortedSetOp)
                 {
                     case SortedSetOperation.ZADD:
@@ -204,6 +210,9 @@ namespace Garnet.server
                     case SortedSetOperation.ZSCORE:
                         SortedSetScore(_input, ref output);
                         break;
+                    case SortedSetOperation.ZMSCORE:
+                        SortedSetScores(_input, input.Length, ref output);
+                        break;
                     case SortedSetOperation.ZCOUNT:
                         SortedSetCount(_input, input.Length, _output);
                         break;
@@ -211,7 +220,7 @@ namespace Garnet.server
                         SortedSetIncrement(_input, input.Length, ref output);
                         break;
                     case SortedSetOperation.ZRANK:
-                        SortedSetRank(_input, input.Length, _output);
+                        SortedSetRank(_input, input.Length, ref output);
                         break;
                     case SortedSetOperation.ZRANGE:
                         SortedSetRange(_input, input.Length, ref output);
@@ -238,7 +247,7 @@ namespace Garnet.server
                         SortedSetReverseRange(_input, input.Length, ref output);
                         break;
                     case SortedSetOperation.ZREVRANK:
-                        SortedSetReverseRank(_input, input.Length, _output);
+                        SortedSetReverseRank(_input, input.Length, ref output);
                         break;
                     case SortedSetOperation.ZREMRANGEBYLEX:
                         SortedSetRemoveRangeByLex(_input, input.Length, _output);
@@ -256,7 +265,7 @@ namespace Garnet.server
                         SortedSetPopMin(_input, ref output);
                         break;
                     case SortedSetOperation.ZRANDMEMBER:
-                        SortedSetRandomMember(_input, input.Length, ref output);
+                        SortedSetRandomMember(_input, ref output);
                         break;
                     case SortedSetOperation.ZSCAN:
                         if (ObjectUtils.ReadScanInput(_input, input.Length, ref output, out var cursorInput, out var pattern, out var patternLength, out int limitCount, out int bytesDone))
@@ -268,8 +277,10 @@ namespace Garnet.server
                     default:
                         throw new GarnetException($"Unsupported operation {(SortedSetOperation)_input[0]} in SortedSetObject.Operate");
                 }
-                sizeChange = this.Size - previouseSize;
+                sizeChange = this.Size - prevSize;
             }
+
+            removeKey = sortedSetDict.Count == 0;
             return true;
         }
 
@@ -348,14 +359,17 @@ namespace Garnet.server
         /// </summary>
         public static Dictionary<byte[], double> CopyDiff(Dictionary<byte[], double> dict1, Dictionary<byte[], double> dict2)
         {
-            Dictionary<byte[], double> result = new();
-            if (dict1 != null)
+            if (dict1 == null)
+                return [];
+
+            if (dict2 == null)
+                return new Dictionary<byte[], double>(dict1, dict1.Comparer);
+
+            var result = new Dictionary<byte[], double>(dict1.Comparer);
+            foreach (var item in dict1)
             {
-                foreach (var item in dict1)
-                {
-                    if (dict2 == null || !dict2.ContainsKey(item.Key))
-                        result.Add(item.Key, item.Value);
-                }
+                if (!dict2.ContainsKey(item.Key))
+                    result.Add(item.Key, item.Value);
             }
             return result;
         }
@@ -379,9 +393,9 @@ namespace Garnet.server
 
         #endregion
 
-        private void UpdateSize(byte[] item, bool add = true)
+        private void UpdateSize(ReadOnlySpan<byte> item, bool add = true)
         {
-            // item's length + overhead to store item + value of type double added to sorted set and dictionary + overhead for those datastructures 
+            // item's length + overhead to store item + value of type double added to sorted set and dictionary + overhead for those datastructures
             var size = Utility.RoundUp(item.Length, IntPtr.Size) + MemoryUtils.ByteArrayOverhead + (2 * sizeof(double))
                 + MemoryUtils.SortedSetEntryOverhead + MemoryUtils.DictionaryEntryOverhead;
             this.Size += add ? size : -size;

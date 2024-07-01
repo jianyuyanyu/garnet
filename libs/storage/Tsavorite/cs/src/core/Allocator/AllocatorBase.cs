@@ -260,9 +260,16 @@ namespace Tsavorite.core
         internal IObserver<ITsavoriteScanIterator<Key, Value>> OnEvictionObserver;
 
         /// <summary>
+        /// Observer for records brought into memory by deserializing pages
+        /// </summary>
+        internal IObserver<ITsavoriteScanIterator<Key, Value>> OnDeserializationObserver;
+
+        /// <summary>
         /// The "event" to be waited on for flush completion by the initiator of an operation
         /// </summary>
         internal CompletionEvent FlushEvent;
+
+        public Func<bool> IsSizeBeyondLimit;
 
         #region Abstract methods
         /// <summary>
@@ -314,7 +321,7 @@ namespace Tsavorite.core
         /// <returns></returns>
         public abstract ref Value GetValue(long physicalAddress);
         /// <summary>
-        /// Get value from address range. For SpanByte this will also initialize the value.
+        /// Get value from address range. For <see cref="SpanByte"/> this will also initialize the value.
         /// </summary>
         /// <param name="physicalAddress"></param>
         /// <param name="endPhysicalAddress"></param>
@@ -345,8 +352,8 @@ namespace Tsavorite.core
         /// Get copy destination size for RMW, taking Input into account
         /// </summary>
         /// <returns></returns>
-        public abstract (int actualSize, int allocatedSize, int keySize) GetRMWCopyDestinationRecordSize<Input, TsavoriteSession>(ref Key key, ref Input input, ref Value value, ref RecordInfo recordInfo, TsavoriteSession tsavoriteSession)
-            where TsavoriteSession : IVariableLengthInput<Value, Input>;
+        public abstract (int actualSize, int allocatedSize, int keySize) GetRMWCopyDestinationRecordSize<Input, TVariableLengthInput>(ref Key key, ref Input input, ref Value value, ref RecordInfo recordInfo, TVariableLengthInput varlenInput)
+            where TVariableLengthInput : IVariableLengthInput<Value, Input>;
 
         /// <summary>
         /// Get number of bytes required
@@ -373,10 +380,10 @@ namespace Tsavorite.core
         /// </summary>
         /// <param name="key"></param>
         /// <param name="input"></param>
-        /// <param name="tsavoriteSession"></param>
+        /// <param name="sessionFunctions"></param>
         /// <returns></returns>
-        public abstract (int actualSize, int allocatedSize, int keySize) GetRMWInitialRecordSize<Input, TsavoriteSession>(ref Key key, ref Input input, TsavoriteSession tsavoriteSession)
-            where TsavoriteSession : IVariableLengthInput<Value, Input>;
+        public abstract (int actualSize, int allocatedSize, int keySize) GetRMWInitialRecordSize<Input, TSessionFunctionsWrapper>(ref Key key, ref Input input, TSessionFunctionsWrapper sessionFunctions)
+            where TSessionFunctionsWrapper : IVariableLengthInput<Value, Input>;
 
         /// <summary>
         /// Get record size
@@ -504,7 +511,7 @@ namespace Tsavorite.core
                         while (physicalAddress < endPhysicalAddress)
                         {
                             ref var info = ref GetInfo(physicalAddress);
-                            var (recordSize, alignedRecordSize) = GetRecordSize(physicalAddress);
+                            var (_, alignedRecordSize) = GetRecordSize(physicalAddress);
                             if (info.Dirty)
                             {
                                 info.ClearDirtyAtomic(); // there may be read locks being taken, hence atomic
@@ -1055,6 +1062,11 @@ namespace Tsavorite.core
         public int AllocatedPageCount;
 
         /// <summary>
+        /// Max number of pages that have been allocated at any point in time
+        /// </summary>
+        public int MaxAllocatedPageCount;
+
+        /// <summary>
         /// Maximum possible number of empty pages in circular buffer
         /// </summary>
         public int MaxEmptyPageCount => BufferSize - 1;
@@ -1116,6 +1128,22 @@ namespace Tsavorite.core
         /// </summary>
         internal abstract void DeleteFromMemory();
 
+        /// <summary>
+        /// Increments AllocatedPageCount
+        /// Update MaxAllocatedPageCount, if a higher number of pages have been allocated.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        protected void IncrementAllocatedPageCount()
+        {
+            var newAllocatedPageCount = Interlocked.Increment(ref AllocatedPageCount);
+            var currMaxAllocatedPageCount = MaxAllocatedPageCount;
+            while (currMaxAllocatedPageCount < newAllocatedPageCount)
+            {
+                if (Interlocked.CompareExchange(ref MaxAllocatedPageCount, newAllocatedPageCount, currMaxAllocatedPageCount) == currMaxAllocatedPageCount)
+                    return;
+                currMaxAllocatedPageCount = MaxAllocatedPageCount;
+            }
+        }
 
         /// <summary>
         /// Segment size
@@ -1342,8 +1370,7 @@ namespace Tsavorite.core
             notifyDone = null;
             tailAddress = GetTailAddress();
             long localTailAddress = tailAddress;
-            long currentReadOnlyOffset = ReadOnlyAddress;
-            if (Utility.MonotonicUpdate(ref ReadOnlyAddress, tailAddress, out long oldReadOnlyOffset))
+            if (Utility.MonotonicUpdate(ref ReadOnlyAddress, tailAddress, out _))
             {
                 notifyFlushedUntilAddressSemaphore = new SemaphoreSlim(0);
                 notifyDone = notifyFlushedUntilAddressSemaphore;
@@ -1361,7 +1388,7 @@ namespace Tsavorite.core
         /// <param name="noFlush"></param>
         public bool ShiftReadOnlyAddress(long newReadOnlyAddress, bool noFlush = false)
         {
-            if (Utility.MonotonicUpdate(ref ReadOnlyAddress, newReadOnlyAddress, out long oldReadOnlyOffset))
+            if (Utility.MonotonicUpdate(ref ReadOnlyAddress, newReadOnlyAddress, out _))
             {
                 epoch.BumpCurrentEpoch(() => OnPagesMarkedReadOnly(newReadOnlyAddress, noFlush));
                 return true;
@@ -1378,7 +1405,7 @@ namespace Tsavorite.core
         public void ShiftBeginAddress(long newBeginAddress, bool truncateLog, bool noFlush = false)
         {
             // First update the begin address
-            if (!Utility.MonotonicUpdate(ref BeginAddress, newBeginAddress, out long oldBeginAddress))
+            if (!Utility.MonotonicUpdate(ref BeginAddress, newBeginAddress, out _))
             {
                 if (truncateLog)
                     epoch.BumpCurrentEpoch(() => TruncateUntilAddress(newBeginAddress));
@@ -1413,7 +1440,7 @@ namespace Tsavorite.core
             }
 
             // Then shift head address
-            var h = Utility.MonotonicUpdate(ref HeadAddress, newBeginAddress, out long old);
+            var h = Utility.MonotonicUpdate(ref HeadAddress, newBeginAddress, out _);
 
             if (h || truncateLog)
             {
@@ -1425,6 +1452,19 @@ namespace Tsavorite.core
                         TruncateUntilAddress(newBeginAddress);
                 });
             }
+        }
+
+        /// <summary>
+        /// Invokes eviction observer if set and then frees the page.
+        /// </summary>
+        /// <param name="page"></param>
+        public virtual void EvictPage(long page)
+        {
+            var start = page << LogPageSizeBits;
+            var end = (page + 1) << LogPageSizeBits;
+            if (OnEvictionObserver is not null)
+                MemoryPageScan(start, end, OnEvictionObserver);
+            FreePage(page);
         }
 
         /// <summary>
@@ -1586,10 +1626,9 @@ namespace Tsavorite.core
         /// <param name="currentTailAddress"></param>
         private void PageAlignedShiftReadOnlyAddress(long currentTailAddress)
         {
-            long currentReadOnlyAddress = ReadOnlyAddress;
             long pageAlignedTailAddress = currentTailAddress & ~PageSizeMask;
             long desiredReadOnlyAddress = pageAlignedTailAddress - ReadOnlyLagAddress;
-            if (Utility.MonotonicUpdate(ref ReadOnlyAddress, desiredReadOnlyAddress, out long oldReadOnlyAddress))
+            if (Utility.MonotonicUpdate(ref ReadOnlyAddress, desiredReadOnlyAddress, out _))
             {
                 // Debug.WriteLine("Allocate: Moving read-only offset from {0:X} to {1:X}", oldReadOnlyAddress, desiredReadOnlyAddress);
                 epoch.BumpCurrentEpoch(() => OnPagesMarkedReadOnly(desiredReadOnlyAddress));
@@ -1619,7 +1658,7 @@ namespace Tsavorite.core
                 newHeadAddress = currentFlushedUntilAddress;
             }
 
-            if (Utility.MonotonicUpdate(ref HeadAddress, newHeadAddress, out long oldHeadAddress))
+            if (Utility.MonotonicUpdate(ref HeadAddress, newHeadAddress, out _))
             {
                 // Debug.WriteLine("Allocate: Moving head offset from {0:X} to {1:X}", oldHeadAddress, newHeadAddress);
                 epoch.BumpCurrentEpoch(() => OnPagesClosed(newHeadAddress));
@@ -1909,7 +1948,6 @@ namespace Tsavorite.core
             long endPage = untilAddress >> LogPageSizeBits;
             int numPages = (int)(endPage - startPage);
 
-            long offsetInStartPage = GetOffsetInPage(fromAddress);
             long offsetInEndPage = GetOffsetInPage(untilAddress);
 
             // Extra (partial) page being flushed
@@ -2000,7 +2038,6 @@ namespace Tsavorite.core
         {
             for (long flushPage = flushPageStart; flushPage < (flushPageStart + numPages); flushPage++)
             {
-                int pageIndex = GetPageIndexForPage(flushPage);
                 var asyncResult = new PageAsyncFlushResult<TContext>()
                 {
                     page = flushPage,
@@ -2028,7 +2065,7 @@ namespace Tsavorite.core
         /// <param name="throttleCheckpointFlushDelayMs"></param>
         public void AsyncFlushPagesToDevice(long startPage, long endPage, long endLogicalAddress, long fuzzyStartLogicalAddress, IDevice device, IDevice objectLogDevice, out SemaphoreSlim completedSemaphore, int throttleCheckpointFlushDelayMs)
         {
-            logger?.LogTrace("Starting async delta log flush with throttling {throttlingEnabled}", throttleCheckpointFlushDelayMs >= 0 ? $"enabled ({throttleCheckpointFlushDelayMs}ms)" : "disabled");
+            logger?.LogTrace("Starting async full log flush with throttling {throttlingEnabled}", throttleCheckpointFlushDelayMs >= 0 ? $"enabled ({throttleCheckpointFlushDelayMs}ms)" : "disabled");
 
             var _completedSemaphore = new SemaphoreSlim(0);
             completedSemaphore = _completedSemaphore;
@@ -2251,12 +2288,15 @@ namespace Tsavorite.core
 
                     if (result.fromAddress > startAddress)
                         startAddress = result.fromAddress;
+                    if (result.untilAddress < endAddress)
+                        endAddress = result.untilAddress;
+
                     var _readOnlyAddress = SafeReadOnlyAddress;
                     if (_readOnlyAddress > startAddress)
                         startAddress = _readOnlyAddress;
+                    if (_readOnlyAddress > endAddress)
+                        endAddress = _readOnlyAddress;
 
-                    if (result.untilAddress < endAddress)
-                        endAddress = result.untilAddress;
                     int flushWidth = (int)(endAddress - startAddress);
 
                     if (flushWidth > 0)
@@ -2267,7 +2307,7 @@ namespace Tsavorite.core
                         while (physicalAddress < endPhysicalAddress)
                         {
                             ref var info = ref GetInfo(physicalAddress);
-                            var (recordSize, alignedRecordSize) = GetRecordSize(physicalAddress);
+                            var (_, alignedRecordSize) = GetRecordSize(physicalAddress);
                             if (info.Dirty)
                                 info.ClearDirtyAtomic(); // there may be read locks being taken, hence atomic
                             physicalAddress += alignedRecordSize;

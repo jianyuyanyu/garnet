@@ -16,7 +16,7 @@ namespace Garnet.server
         /// <summary>
         /// Port to run server on.
         /// </summary>
-        public int Port = 3278;
+        public int Port = 6379;
 
         /// <summary>
         /// IP address to bind server to.
@@ -41,7 +41,7 @@ namespace Garnet.server
         /// <summary>
         /// Size of hash index in bytes (rounds down to power of 2).
         /// </summary>
-        public string IndexSize = "8g";
+        public string IndexSize = "128m";
 
         /// <summary>
         /// Max size of hash index in bytes (rounds down to power of 2). If unspecified, index size doesn't grow (default behavior).
@@ -292,7 +292,7 @@ namespace Garnet.server
         /// </summary>
         /// <param name="v"></param>
         /// <returns></returns>
-        protected long PreviousPowerOf2(long v)
+        protected static long PreviousPowerOf2(long v)
         {
             v |= v >> 1;
             v |= v >> 2;

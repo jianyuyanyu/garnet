@@ -2,7 +2,10 @@
 // Licensed under the MIT license.
 
 using System;
+using System.Globalization;
+using System.Linq;
 using System.Text;
+using Garnet.common;
 using Garnet.server;
 using NUnit.Framework;
 using StackExchange.Redis;
@@ -146,13 +149,16 @@ namespace Garnet.test
             var entries = new GeoEntry[cities.GetLength(0)];
             for (int j = 0; j < cities.GetLength(0); j++)
             {
-                entries[j] = new GeoEntry(Double.Parse(cities[j, 0]), Double.Parse(cities[j, 1]), new RedisValue(cities[j, 2]));
+                entries[j] = new GeoEntry(
+                    double.Parse(cities[j, 0], CultureInfo.InvariantCulture),
+                    double.Parse(cities[j, 1], CultureInfo.InvariantCulture),
+                    new RedisValue(cities[j, 2]));
             }
             var response = db.GeoAdd(new RedisKey("cities"), entries, CommandFlags.None);
             Assert.AreEqual(23, response);
 
             var memresponse = db.Execute("MEMORY", "USAGE", "cities");
-            var actualValue = ResultType.Integer == memresponse.Type ? Int32.Parse(memresponse.ToString()) : -1;
+            var actualValue = ResultType.Integer == memresponse.Resp2Type ? int.Parse(memresponse.ToString()) : -1;
             var expectedResponse = 3944;
             Assert.AreEqual(expectedResponse, actualValue);
         }
@@ -167,7 +173,10 @@ namespace Garnet.test
             var entries = new GeoEntry[worldcities.GetLength(0)];
             for (int j = 0; j < worldcities.GetLength(0); j++)
             {
-                entries[j] = new GeoEntry(Double.Parse(worldcities[j, 0]), Double.Parse(worldcities[j, 1]), new RedisValue($"{worldcities[j, 2]}"));
+                entries[j] = new GeoEntry(
+                    double.Parse(worldcities[j, 0], CultureInfo.InvariantCulture),
+                    double.Parse(worldcities[j, 1], CultureInfo.InvariantCulture),
+                    new RedisValue($"{worldcities[j, 2]}"));
             }
 
             //Number of objects that will trigger pending status in object store
@@ -188,31 +197,31 @@ namespace Garnet.test
             using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
             var db = redis.GetDatabase(0);
             db.GeoAdd(new RedisKey("Sicily"), 13.361389, 38.115556, new RedisValue("Palermo"), CommandFlags.None);
-            var response = db.GeoPosition(new RedisKey("Sicily"), new RedisValue[] { "Palermo", "Unknown" });
+            var response = db.GeoPosition(new RedisKey("Sicily"), ["Palermo", "Unknown"]);
             Assert.AreEqual(2, response.Length);
             Assert.AreEqual(default(GeoPosition), response[1]);
 
             var memresponse = db.Execute("MEMORY", "USAGE", "Sicily");
-            var actualValue = ResultType.Integer == memresponse.Type ? Int32.Parse(memresponse.ToString()) : -1;
+            var actualValue = ResultType.Integer == memresponse.Resp2Type ? Int32.Parse(memresponse.ToString()) : -1;
             var expectedResponse = 344;
             Assert.AreEqual(expectedResponse, actualValue);
 
             db.GeoAdd(new RedisKey("SecondKey"), 13.361389, 38.115556, new RedisValue("Palermo"));
-            response = db.GeoPosition(new RedisKey("SecondKey"), new RedisValue[] { "Palermo" });
+            response = db.GeoPosition(new RedisKey("SecondKey"), ["Palermo"]);
             Assert.AreEqual(1, response.Length);
             Assert.IsNotNull(response[0]);
 
             memresponse = db.Execute("MEMORY", "USAGE", "SecondKey");
-            actualValue = ResultType.Integer == memresponse.Type ? Int32.Parse(memresponse.ToString()) : -1;
+            actualValue = ResultType.Integer == memresponse.Resp2Type ? Int32.Parse(memresponse.ToString()) : -1;
             expectedResponse = 352;
             Assert.AreEqual(expectedResponse, actualValue);
 
-            var responseHash = db.GeoHash(new RedisKey("SecondKey"), new RedisValue[] { "Palermo" });
+            var responseHash = db.GeoHash(new RedisKey("SecondKey"), ["Palermo"]);
             Assert.AreEqual(1, responseHash.Length);
-            Assert.AreEqual("sqc8b49rnyt", responseHash[0]);
+            Assert.AreEqual("sqc8b49rnys", responseHash[0]);
 
             memresponse = db.Execute("MEMORY", "USAGE", "SecondKey");
-            actualValue = ResultType.Integer == memresponse.Type ? Int32.Parse(memresponse.ToString()) : -1;
+            actualValue = ResultType.Integer == memresponse.Resp2Type ? Int32.Parse(memresponse.ToString()) : -1;
             expectedResponse = 352;
             Assert.AreEqual(expectedResponse, actualValue);
         }
@@ -226,6 +235,42 @@ namespace Garnet.test
             db.GeoAdd(key, 13.361389, 38.115556, new RedisValue("Palermo"), CommandFlags.None);
             var box = new GeoSearchBox(500, 500, GeoUnit.Kilometers);
             Assert.Throws<RedisServerException>(() => db.GeoSearch(key, 73.9262, 40.8296, box, count: 2));
+        }
+
+        [Test]
+        public void CheckGeoSortedSetOperationsOnWrongTypeObjectSE()
+        {
+            using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
+            var db = redis.GetDatabase(0);
+
+            var keys = new[] { new RedisKey("user1:obj1"), new RedisKey("user1:obj2") };
+            var values = new[]
+            {
+                new[] { new RedisValue("Tel Aviv"), new RedisValue("Haifa") },
+                new[] { new RedisValue("Athens"), new RedisValue("Thessaloniki") }
+            };
+            var coords = new[]
+            {
+                new[] { new[] { 2.0853, 34.7818 }, new[] { 32.7940, 34.9896 } },
+                new[] { new[] { 7.9838, 23.7275 }, new[] { 40.6401, 22.9444 } }
+            };
+
+            var geoEntries = values.Select((h, idx) => h
+                .Zip(coords[idx], (v, c) => new GeoEntry(c[0], c[1], v)).ToArray()).ToArray();
+
+            // Set up different type objects
+            RespTestsUtils.SetUpTestObjects(db, GarnetObjectType.Set, keys, values);
+
+            // GEOADD
+            RespTestsUtils.CheckCommandOnWrongTypeObjectSE(() => db.GeoAdd(keys[0], geoEntries[0]));
+            // GEOHASH
+            RespTestsUtils.CheckCommandOnWrongTypeObjectSE(() => db.GeoHash(keys[0], values[0]));
+            // GEODIST
+            RespTestsUtils.CheckCommandOnWrongTypeObjectSE(() => db.GeoDistance(keys[0], values[0][1], values[0][1]));
+            // GEOPOS
+            RespTestsUtils.CheckCommandOnWrongTypeObjectSE(() => db.GeoPosition(keys[0], values[0]));
+            // GEOSEARCH
+            RespTestsUtils.CheckCommandOnWrongTypeObjectSE(() => db.GeoSearch(keys[0], values[0][1], new GeoSearchBox(800, 800, GeoUnit.Kilometers)));
         }
 
         //end region of SE tests
@@ -244,7 +289,10 @@ namespace Garnet.test
             var entries = new GeoEntry[cities.GetLength(0)];
             for (int j = 0; j < cities.GetLength(0); j++)
             {
-                entries[j] = new GeoEntry(Double.Parse(cities[j, 0]), Double.Parse(cities[j, 1]), new RedisValue(cities[j, 2]));
+                entries[j] = new GeoEntry(
+                    double.Parse(cities[j, 0], CultureInfo.InvariantCulture),
+                    double.Parse(cities[j, 1], CultureInfo.InvariantCulture),
+                    new RedisValue(cities[j, 2]));
             }
             var response = db.GeoAdd(new RedisKey("cities"), entries, CommandFlags.None);
             Assert.AreEqual(23, response);
@@ -272,13 +320,26 @@ namespace Garnet.test
         public void CanDoGeoAddWhenInvalidPairLC(int bytesSent)
         {
             using var lightClientRequest = TestUtils.CreateRequest();
-            var response = lightClientRequest.SendCommandChunks("GEOADD Sicily NX 13.361389 38.115556 Palermo 15.087269 37.502669 Catania", bytesSent);
-            var expectedResponse = ":2\r\n";
+
+            // Check GEOADD without members
+            var response = lightClientRequest.SendCommandChunks("GEOADD Sicily NX", bytesSent);
+            var expectedResponse = $"-{string.Format(CmdStrings.GenericErrWrongNumArgs, nameof(SortedSetOperation.GEOADD))}\r\n";
             var actualValue = Encoding.ASCII.GetString(response).Substring(0, expectedResponse.Length);
             Assert.AreEqual(expectedResponse, actualValue);
 
+            response = lightClientRequest.SendCommandChunks("GEOADD Sicily NX 13.361389 38.115556 Palermo 15.087269 37.502669 Catania", bytesSent);
+            expectedResponse = ":2\r\n";
+            actualValue = Encoding.ASCII.GetString(response).Substring(0, expectedResponse.Length);
+            Assert.AreEqual(expectedResponse, actualValue);
+
+            // Add new elements, return only the elements changed
+            response = lightClientRequest.SendCommandChunks("GEOADD Sicily NX CH 14.361389 39.115556 Palermo 15.087269 37.502669 Catania 38.0350 14.0212 Cefalu 37.8545 15.2889 Taormina", bytesSent);
+            expectedResponse = ":2\r\n";
+            actualValue = Encoding.ASCII.GetString(response).Substring(0, expectedResponse.Length);
+            Assert.AreEqual(expectedResponse, actualValue);
+
             // Only update elements, return only the elements changed
-            response = lightClientRequest.SendCommandChunks("GEOADD Sicily XX CH 14.361389 39.115556 Palermo 15.087269 37.502669 Catania", bytesSent);
+            response = lightClientRequest.SendCommandChunks("GEOADD Sicily XX CH 15.361389 39.115556 Palermo 15.087269 37.502669 Catania", bytesSent);
             expectedResponse = ":1\r\n";
             actualValue = Encoding.ASCII.GetString(response).Substring(0, expectedResponse.Length);
             Assert.AreEqual(expectedResponse, actualValue);
@@ -311,22 +372,22 @@ namespace Garnet.test
         [TestCase(100)]
         public void CanUseGeoHash(int bytesSent)
         {
-            using var lightClientRequest = TestUtils.CreateRequest(countResponseLength: true);
+            using var lightClientRequest = TestUtils.CreateRequest(countResponseType: CountResponseType.Bytes);
 
             var expectedResponse = ":2\r\n+PONG\r\n";
             var response = lightClientRequest.Execute("GEOADD Sicily 13.361389 38.115556 Palermo 15.087269 37.502669 Catania", "PING", expectedResponse.Length, bytesSent);
             Assert.AreEqual(expectedResponse, response);
 
-            expectedResponse = "*3\r\n$11\r\nsqc8b49rnyt\r\n$11\r\nsqdtr74hyu1\r\n$-1\r\n+PONG\r\n";
+            expectedResponse = "*3\r\n$11\r\nsqc8b49rnys\r\n$11\r\nsqdtr74hyu0\r\n$-1\r\n+PONG\r\n";
             response = lightClientRequest.Execute("GEOHASH Sicily Palermo Catania Unknown", "PING", expectedResponse.Length, bytesSent);
             Assert.AreEqual(expectedResponse, response);
 
-            expectedResponse = "*3\r\n$11\r\nsqc8b49rnyt\r\n$11\r\nsqdtr74hyu1\r\n$-1\r\n";
+            expectedResponse = "*3\r\n$11\r\nsqc8b49rnys\r\n$11\r\nsqdtr74hyu0\r\n$-1\r\n";
             response = lightClientRequest.Execute("GEOHASH Sicily Palermo Catania Unknown", expectedResponse.Length, bytesSent);
             Assert.AreEqual(expectedResponse, response);
 
             // Execute command in chunks
-            expectedResponse = "*1\r\n$11\r\nsqc8b49rnyt\r\n";
+            expectedResponse = "*1\r\n$11\r\nsqc8b49rnys\r\n";
             response = lightClientRequest.Execute("GEOHASH Sicily Palermo", expectedResponse.Length, bytesSent);
             Assert.AreEqual(expectedResponse, response);
         }
@@ -337,7 +398,7 @@ namespace Garnet.test
         [TestCase(100)]
         public void CanUseGeoDist(int bytesSent)
         {
-            using var lightClientRequest = TestUtils.CreateRequest(countResponseLength: true);
+            using var lightClientRequest = TestUtils.CreateRequest(countResponseType: CountResponseType.Bytes);
 
             var expectedResponse = ":2\r\n+PONG\r\n";
             var response = lightClientRequest.Execute("GEOADD Sicily 13.361389 38.115556 Palermo 15.087269 37.502669 Catania", "PING", expectedResponse.Length, bytesSent);
@@ -398,10 +459,15 @@ namespace Garnet.test
         [TestCase(100)]
         public void CanUseGeoPosLC(int bytesSent)
         {
-            using var lightClientRequest = TestUtils.CreateRequest(countResponseLength: true);
+            using var lightClientRequest = TestUtils.CreateRequest(countResponseType: CountResponseType.Bytes);
 
             var expectedResponse = ":2\r\n+PONG\r\n";
             var response = lightClientRequest.Execute("GEOADD Sicily 13.361389 38.115556 Palermo 15.087269 37.502669 Catania", "PING", expectedResponse.Length, bytesSent);
+            Assert.AreEqual(expectedResponse, response);
+
+            // GEOPOS with unknown key
+            response = lightClientRequest.Execute("GEOPOS Unknown Palermo Catania", expectedResponse.Length, bytesSent);
+            expectedResponse = "*2\r\n*-1\r\n*-1\r\n";
             Assert.AreEqual(expectedResponse, response);
 
             expectedResponse = "*3\r\n*2\r\n$18\r\n13.361389338970184\r\n$17\r\n38.11555668711662\r\n*2\r\n$18\r\n15.087267458438873\r\n$18\r\n37.502669245004654\r\n*-1\r\n+PONG\r\n";
@@ -421,57 +487,15 @@ namespace Garnet.test
         {
             using var lightClientRequest = TestUtils.CreateRequest();
             var response = lightClientRequest.SendCommands("GEOADD Sicily 13.361389 38.115556", "PING");
-            var expectedResponse = "-ERR wrong number of arguments for GEOADD command.\r\n+PONG\r\n";
+            var expectedResponse = $"-{string.Format(CmdStrings.GenericErrWrongNumArgs, "GEOADD")}\r\n+PONG\r\n";
             var actualValue = Encoding.ASCII.GetString(response).Substring(0, expectedResponse.Length);
             Assert.AreEqual(expectedResponse, actualValue);
 
             response = lightClientRequest.SendCommandChunks("GEOADD Sicily 13.361389 38.115556", bytesSent);
-            expectedResponse = "-ERR wrong number of arguments for GEOADD command.\r\n";
+            expectedResponse = $"-{string.Format(CmdStrings.GenericErrWrongNumArgs, "GEOADD")}\r\n";
             actualValue = Encoding.ASCII.GetString(response).Substring(0, expectedResponse.Length);
             Assert.AreEqual(expectedResponse, actualValue);
         }
-        #endregion
-
-        #region GeoHash Class Tests
-
-        [Test]
-        public void CanEncodeAndDecodeCoordinates()
-        {
-            double latitude = 30.5388942218;
-            double longitude = 104.0555758833;
-
-            var r = GeoHash.GeoToLongValue(latitude, longitude);
-            Assert.AreEqual(4024744861876082, r);
-            var coord = GeoHash.GetCoordinatesFromLong(r);
-
-            //Assert difference is not higher than "0.000001" using fixed point format
-            var diff = (Math.Round(latitude, 9) - Math.Round(coord.Item1, 9)).ToString("F6");
-            Assert.IsTrue(double.Parse(diff) <= 0.000001);
-        }
-
-        [Test]
-        public void CanEncodeAndDecodeCoordinatesWithGeoHashCode()
-        {
-            double latitude = 37.502669;
-            double longitude = 15.087269;
-
-            var r = GeoHash.GeoToLongValue(latitude, longitude);
-            Assert.AreEqual(3476216502357864, r);
-
-            // Only check the first 10 chars
-            var geoHash = GeoHash.GetGeoHashCode(r).Substring(0, 9);
-            Assert.IsTrue("sqdtr74hyu0".IndexOf(geoHash) == 0);
-
-            longitude = 13.361389;
-            latitude = 38.115556;
-
-            r = GeoHash.GeoToLongValue(latitude, longitude);
-            Assert.AreEqual(3476004292229755, r);
-
-            geoHash = GeoHash.GetGeoHashCode(r).Substring(0, 9);
-            Assert.IsTrue("sqc8b49rnyt".IndexOf(geoHash) == 0);
-        }
-
         #endregion
     }
 }

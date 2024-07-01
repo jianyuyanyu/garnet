@@ -2,7 +2,6 @@
 // Licensed under the MIT license.
 
 using System;
-using System.Linq;
 using System.Runtime.CompilerServices;
 using Garnet.common;
 
@@ -11,11 +10,10 @@ namespace Garnet.server
     /// <summary>
     /// Latency metrics emitted from RespServerSession
     /// </summary>
-    internal class GarnetLatencyMetricsSession
+    internal sealed class GarnetLatencyMetricsSession
     {
         readonly GarnetServerMonitor monitor;
-        static readonly LatencyMetricsType[] defaultLatencyTypes =
-            Enum.GetValues(typeof(LatencyMetricsType)).Cast<LatencyMetricsType>().ToArray();
+        static readonly LatencyMetricsType[] defaultLatencyTypes = Enum.GetValues<LatencyMetricsType>();
         int Version => (int)(monitor.monitor_iterations % 2);
         public int PriorVersion => 1 - Version;
         public LatencyMetricsEntrySession[] metrics;

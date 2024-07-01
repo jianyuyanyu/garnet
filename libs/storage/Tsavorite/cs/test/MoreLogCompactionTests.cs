@@ -1,6 +1,7 @@
 ﻿// Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
+using System.IO;
 using NUnit.Framework;
 using Tsavorite.core;
 
@@ -16,7 +17,7 @@ namespace Tsavorite.test
         public void Setup()
         {
             TestUtils.DeleteDirectory(TestUtils.MethodTestDir, wait: true);
-            log = Devices.CreateLogDevice(TestUtils.MethodTestDir + "/MoreLogCompactionTests.log", deleteOnClose: true);
+            log = Devices.CreateLogDevice(Path.Join(TestUtils.MethodTestDir, "MoreLogCompactionTests.log"), deleteOnClose: true);
             store = new TsavoriteKV<long, long>
                 (1L << 20, new LogSettings { LogDevice = log, MemorySizeBits = 15, PageSizeBits = 9 });
         }
@@ -38,7 +39,8 @@ namespace Tsavorite.test
 
         public void DeleteCompactLookup([Values] CompactionType compactionType)
         {
-            using var session = store.NewSession<long, long, Empty, SimpleFunctions<long, long>>(new SimpleFunctions<long, long>());
+            using var session = store.NewSession<long, long, Empty, SimpleSimpleFunctions<long, long>>(new SimpleSimpleFunctions<long, long>());
+            var bContext = session.BasicContext;
 
             const int totalRecords = 2000;
             var start = store.Log.TailAddress;
@@ -48,25 +50,26 @@ namespace Tsavorite.test
             {
                 if (i == 1010)
                     compactUntil = store.Log.TailAddress;
-                session.Upsert(i, i);
+                bContext.Upsert(i, i);
             }
 
             for (int i = 0; i < totalRecords / 2; i++)
-                session.Delete(i);
+                bContext.Delete(i);
 
             compactUntil = session.Compact(compactUntil, compactionType);
 
             Assert.AreEqual(compactUntil, store.Log.BeginAddress);
 
-            using var session2 = store.NewSession<long, long, Empty, SimpleFunctions<long, long>>(new SimpleFunctions<long, long>());
+            using var session2 = store.NewSession<long, long, Empty, SimpleSimpleFunctions<long, long>>(new SimpleSimpleFunctions<long, long>());
+            var bContext2 = session2.BasicContext;
 
             // Verify records by reading
             for (int i = 0; i < totalRecords; i++)
             {
-                (var status, var output) = session2.Read(i);
+                (var status, var output) = bContext2.Read(i);
                 if (status.IsPending)
                 {
-                    session2.CompletePendingWithOutputs(out var completedOutputs, true);
+                    bContext2.CompletePendingWithOutputs(out var completedOutputs, true);
                     Assert.IsTrue(completedOutputs.Next());
                     (status, output) = (completedOutputs.Current.Status, completedOutputs.Current.Output);
                     Assert.IsFalse(completedOutputs.Next());

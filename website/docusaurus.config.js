@@ -65,6 +65,10 @@ const config = {
     ],
   ],
 
+  plugins: [
+    "docusaurus-plugin-clarity",
+  ],
+
   themeConfig:
     /** @type {import('@docusaurus/preset-classic').ThemeConfig} */
     ({
@@ -74,7 +78,7 @@ const config = {
         title: 'Garnet',
         logo: {
           alt: 'Garnet Logo',
-          src: 'img/garnet-logo.png',
+          src: 'img/garnet-logo-diamond.png',
         },
         items: [
           {
@@ -135,6 +139,9 @@ const config = {
           https://go.microsoft.com/fwlink/?LinkId=521839"
           style="color: white;">Privacy &amp; Cookies</a> |
           <a href="
+          https://go.microsoft.com/fwlink/?LinkID=2259814"
+          style="color: white;">Consumer Health Privacy</a> |
+          <a href="
           https://go.microsoft.com/fwlink/?LinkID=206977"
           style="color: white;">Terms of Use</a> |
           <a href="
@@ -143,6 +150,7 @@ const config = {
           </p>`,
       },
       prism: {
+        additionalLanguages: ['csharp'],
         theme: prismThemes.github,
         darkTheme: prismThemes.dracula,
       },
@@ -151,9 +159,28 @@ const config = {
         disableSwitch: false,
         respectPrefersColorScheme: false,
       },
+      clarity: {
+        ID: "loh6v65ww5",
+      },
+      // github codeblock theme configuration
+        codeblock: {
+            showGithubLink: true,
+            githubLinkLabel: 'View on GitHub',
+            showRunmeLink: false,
+            runmeLinkLabel: 'Checkout via Runme'
+      },
     }),
-
-  themes: ['@docusaurus/theme-mermaid'],
+  themes: [
+    '@docusaurus/theme-mermaid',
+    'docusaurus-theme-github-codeblock',
+    [
+      require.resolve("@easyops-cn/docusaurus-search-local"),
+      {
+        hashed: true,
+        blogDir: "./blog/",
+      },
+    ],
+  ],
 };
 
 export default config;

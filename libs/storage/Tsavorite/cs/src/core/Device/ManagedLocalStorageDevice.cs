@@ -139,12 +139,7 @@ namespace Tsavorite.core
             bool gotHandle;
             int numBytes = 0;
 
-#if NETSTANDARD2_1 || NET
             UnmanagedMemoryManager<byte> umm = default;
-#else
-            SectorAlignedMemory memory = default;
-#endif
-
             try
             {
                 Interlocked.Increment(ref numPending);
@@ -153,16 +148,11 @@ namespace Tsavorite.core
                 if (gotHandle)
                 {
                     logReadHandle.Seek((long)sourceAddress, SeekOrigin.Begin);
-#if NETSTANDARD2_1 || NET
                     unsafe
                     {
                         umm = new UnmanagedMemoryManager<byte>((byte*)destinationAddress, (int)readLength);
                     }
                     readTask = logReadHandle.ReadAsync(umm.Memory).AsTask();
-#else
-                    memory = pool.Get((int)readLength);
-                    readTask = logReadHandle.ReadAsync(memory.buffer, 0, (int)readLength);
-#endif
                 }
             }
             catch
@@ -170,9 +160,6 @@ namespace Tsavorite.core
                 Interlocked.Decrement(ref numPending);
 
                 // Perform pool returns and disposals
-#if !(NETSTANDARD2_1 || NET)
-                memory?.Return();
-#endif
                 if (logReadHandle != null) streampool?.Return(logReadHandle);
 
                 // Issue user callback
@@ -188,26 +175,17 @@ namespace Tsavorite.core
                     {
                         logReadHandle = await streampool.GetAsync().ConfigureAwait(false);
                         logReadHandle.Seek((long)sourceAddress, SeekOrigin.Begin);
-#if NETSTANDARD2_1 || NET
                         unsafe
                         {
                             umm = new UnmanagedMemoryManager<byte>((byte*)destinationAddress, (int)readLength);
                         }
-
                         readTask = logReadHandle.ReadAsync(umm.Memory).AsTask();
-#else
-                        memory = pool.Get((int)readLength);
-                        readTask = logReadHandle.ReadAsync(memory.buffer, 0, (int)readLength);
-#endif
                     }
                     catch
                     {
                         Interlocked.Decrement(ref numPending);
 
                         // Perform pool returns and disposals
-#if !(NETSTANDARD2_1 || NET)
-                        memory?.Return();
-#endif
                         if (logReadHandle != null) streampool?.Return(logReadHandle);
 
                         // Issue user callback
@@ -219,14 +197,6 @@ namespace Tsavorite.core
                 try
                 {
                     numBytes = await readTask.ConfigureAwait(false);
-
-#if !(NETSTANDARD2_1 || NET)
-                    unsafe
-                    {
-                        fixed (void* source = memory.buffer)
-                            Buffer.MemoryCopy(source, (void*)destinationAddress, numBytes, numBytes);
-                    }
-#endif
                 }
                 catch (Exception ex)
                 {
@@ -240,10 +210,6 @@ namespace Tsavorite.core
                 {
                     Interlocked.Decrement(ref numPending);
 
-                    // Perform pool returns and disposals
-#if !(NETSTANDARD2_1 || NET)
-                    memory?.Return();
-#endif
                     // Sequentialize all reads from same handle
                     streampool?.Return(logReadHandle);
 
@@ -275,12 +241,7 @@ namespace Tsavorite.core
             Task writeTask = default;
             bool gotHandle;
 
-#if NETSTANDARD2_1 || NET
             UnmanagedMemoryManager<byte> umm = default;
-#else
-            SectorAlignedMemory memory = default;
-#endif
-
             HandleCapacity(segmentId);
 
             try
@@ -291,24 +252,12 @@ namespace Tsavorite.core
                 if (gotHandle)
                 {
                     logWriteHandle.Seek((long)destinationAddress, SeekOrigin.Begin);
-#if NETSTANDARD2_1 || NET
                     unsafe
                     {
                         umm = new UnmanagedMemoryManager<byte>((byte*)sourceAddress, (int)numBytesToWrite);
                     }
 
                     writeTask = logWriteHandle.WriteAsync(umm.Memory).AsTask();
-#else
-                    memory = pool.Get((int)numBytesToWrite);
-                    unsafe
-                    {
-                        fixed (void* destination = memory.buffer)
-                        {
-                            Buffer.MemoryCopy((void*)sourceAddress, destination, numBytesToWrite, numBytesToWrite);
-                        }
-                    }
-                    writeTask = logWriteHandle.WriteAsync(memory.buffer, 0, (int)numBytesToWrite);
-#endif
                 }
             }
             catch
@@ -316,9 +265,6 @@ namespace Tsavorite.core
                 Interlocked.Decrement(ref numPending);
 
                 // Perform pool returns and disposals
-#if !(NETSTANDARD2_1 || NET)
-                memory?.Return();
-#endif
                 if (logWriteHandle != null) streampool?.Return(logWriteHandle);
 
                 // Issue user callback
@@ -334,33 +280,18 @@ namespace Tsavorite.core
                     {
                         logWriteHandle = await streampool.GetAsync().ConfigureAwait(false);
                         logWriteHandle.Seek((long)destinationAddress, SeekOrigin.Begin);
-#if NETSTANDARD2_1 || NET
                         unsafe
                         {
                             umm = new UnmanagedMemoryManager<byte>((byte*)sourceAddress, (int)numBytesToWrite);
                         }
 
                         writeTask = logWriteHandle.WriteAsync(umm.Memory).AsTask();
-#else
-                        memory = pool.Get((int)numBytesToWrite);
-                        unsafe
-                        {
-                            fixed (void* destination = memory.buffer)
-                            {
-                                Buffer.MemoryCopy((void*)sourceAddress, destination, numBytesToWrite, numBytesToWrite);
-                            }
-                        }
-                        writeTask = logWriteHandle.WriteAsync(memory.buffer, 0, (int)numBytesToWrite);
-#endif
                     }
                     catch
                     {
                         Interlocked.Decrement(ref numPending);
 
                         // Perform pool returns and disposals
-#if !(NETSTANDARD2_1 || NET)
-                        memory?.Return();
-#endif
                         if (logWriteHandle != null) streampool?.Return(logWriteHandle);
 
                         // Issue user callback
@@ -385,10 +316,6 @@ namespace Tsavorite.core
                 {
                     Interlocked.Decrement(ref numPending);
 
-                    // Perform pool returns and disposals
-#if !(NETSTANDARD2_1 || NET)
-                    memory?.Return();
-#endif
                     // Sequentialize all writes to same handle
                     await ((FileStream)logWriteHandle).FlushAsync().ConfigureAwait(false);
                     streampool?.Return(logWriteHandle);
@@ -470,10 +397,10 @@ namespace Tsavorite.core
             }
 
             if (!Native32.GetDiskFreeSpace(filename.Substring(0, 3),
-                                        out uint lpSectorsPerCluster,
+                                        out _,
                                         out uint _sectorSize,
-                                        out uint lpNumberOfFreeClusters,
-                                        out uint lpTotalNumberOfClusters))
+                                        out _,
+                                        out _))
             {
                 Debug.WriteLine("Unable to retrieve information for disk " + filename.Substring(0, 3) + " - check if the disk is available and you have specified the full path with drive name. Assuming sector size of 512 bytes.");
                 _sectorSize = 512;
@@ -553,7 +480,7 @@ namespace Tsavorite.core
         /// <param name="logHandle"></param>
         /// <param name="size"></param>
         /// <returns></returns>
-        private bool SetFileSize(Stream logHandle, long size)
+        private static bool SetFileSize(Stream logHandle, long size)
         {
             logHandle.SetLength(size);
             return true;

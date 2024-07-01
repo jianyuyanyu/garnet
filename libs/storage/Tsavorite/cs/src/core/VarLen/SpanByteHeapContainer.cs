@@ -6,9 +6,9 @@ using System.Runtime.CompilerServices;
 namespace Tsavorite.core
 {
     /// <summary>
-    /// Heap container for SpanByte structs
+    /// Heap container for <see cref="SpanByte"/> structs
     /// </summary>
-    internal class SpanByteHeapContainer : IHeapContainer<SpanByte>
+    internal sealed class SpanByteHeapContainer : IHeapContainer<SpanByte>
     {
         readonly SectorAlignedMemory mem;
 

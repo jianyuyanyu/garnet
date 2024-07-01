@@ -217,6 +217,117 @@ namespace Garnet.test
                 Assert.AreEqual(ldata, returnedData);
             }
         }
+        [Test]
+        [TestCase(63, 15, 1)]
+        [TestCase(63, 1, 1)]
+        [TestCase(16, 16, 1)]
+        [TestCase(5, 64, 1)]
+        public void SeSaveRecoverMultipleObjectsTest(int memorySize, int recoveryMemorySize, int pageSize)
+        {
+            string sizeToString(int size) => size + "k";
+
+            server.Dispose();
+            server = TestUtils.CreateGarnetServer(TestUtils.MethodTestDir, lowMemory: true, MemorySize: sizeToString(memorySize), PageSize: sizeToString(pageSize));
+            server.Start();
+
+            var ldata = new RedisValue[] { "a", "b", "c", "d" };
+            var ldataArr = ldata.Select(x => x).Reverse().ToArray();
+            using (var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig(allowAdmin: true)))
+            {
+                var db = redis.GetDatabase(0);
+                for (int i = 0; i < 3000; i++)
+                    db.ListLeftPush($"SeSaveRecoverTestKey{i:0000}", ldata);
+
+                for (int i = 0; i < 3000; i++)
+                    Assert.AreEqual(ldataArr, db.ListRange($"SeSaveRecoverTestKey{i:0000}"), $"key {i:0000}");
+
+                // Issue and wait for DB save
+                var server = redis.GetServer($"{TestUtils.Address}:{TestUtils.Port}");
+                server.Save(SaveType.BackgroundSave);
+                while (server.LastSave().Ticks == DateTimeOffset.FromUnixTimeSeconds(0).Ticks) Thread.Sleep(10);
+            }
+
+            server.Dispose(false);
+            server = TestUtils.CreateGarnetServer(TestUtils.MethodTestDir, tryRecover: true, lowMemory: true, MemorySize: sizeToString(recoveryMemorySize), PageSize: sizeToString(pageSize), objectStoreTotalMemorySize: "64k");
+            server.Start();
+
+            Assert.LessOrEqual(server.Provider.StoreWrapper.objectStore.MaxAllocatedPageCount, (recoveryMemorySize / pageSize) + 1);
+            using (var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig(allowAdmin: true)))
+            {
+                var db = redis.GetDatabase(0);
+                for (var i = 3000; i < 3100; i++)
+                    db.ListLeftPush($"SeSaveRecoverTestKey{i:0000}", ldata);
+
+                for (var i = 0; i < 3100; i++)
+                    Assert.AreEqual(ldataArr, db.ListRange($"SeSaveRecoverTestKey{i:0000}"), $"key {i:0000}");
+            }
+        }
+
+        [Test]
+        [TestCase("63k", "15k")]
+        [TestCase("63k", "3k")]
+        [TestCase("63k", "1k")]
+        [TestCase("8k", "5k")]
+        [TestCase("16k", "16k")]
+        [TestCase("5k", "8k")]
+        [TestCase("5k", "64k")]
+        public void SeSaveRecoverMultipleKeysTest(string memorySize, string recoveryMemorySize)
+        {
+            bool disableObj = true;
+
+            server.Dispose();
+            server = TestUtils.CreateGarnetServer(TestUtils.MethodTestDir, DisableObjects: disableObj, lowMemory: true, MemorySize: memorySize, PageSize: "1k", enableAOF: true);
+            server.Start();
+
+            using (var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig(allowAdmin: true)))
+            {
+                var db = redis.GetDatabase(0);
+                for (int i = 0; i < 1000; i++)
+                {
+                    db.StringSet($"SeSaveRecoverTestKey{i:0000}", $"SeSaveRecoverTestValue");
+                }
+
+                for (int i = 0; i < 1000; i++)
+                {
+                    var recoveredValue = db.StringGet($"SeSaveRecoverTestKey{i:0000}");
+                    Assert.AreEqual("SeSaveRecoverTestValue", recoveredValue.ToString());
+                }
+
+                var inforesult = db.Execute("INFO");
+
+                // Issue and wait for DB save
+                var server = redis.GetServer($"{TestUtils.Address}:{TestUtils.Port}");
+                server.Save(SaveType.BackgroundSave);
+                while (server.LastSave().Ticks == DateTimeOffset.FromUnixTimeSeconds(0).Ticks) Thread.Sleep(10);
+
+                for (int i = 1000; i < 2000; i++)
+                {
+                    db.StringSet($"SeSaveRecoverTestKey{i:0000}", $"SeSaveRecoverTestValue");
+                }
+
+                for (int i = 1000; i < 2000; i++)
+                {
+                    var recoveredValue = db.StringGet($"SeSaveRecoverTestKey{i:0000}");
+                    Assert.AreEqual("SeSaveRecoverTestValue", recoveredValue.ToString());
+                }
+
+                db.Execute("COMMITAOF");
+            }
+
+            server.Dispose(false);
+            server = TestUtils.CreateGarnetServer(TestUtils.MethodTestDir, DisableObjects: disableObj, tryRecover: true, lowMemory: true, MemorySize: recoveryMemorySize, PageSize: "1k", enableAOF: true);
+            server.Start();
+
+            using (var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig(allowAdmin: true)))
+            {
+                var db = redis.GetDatabase(0);
+                for (int i = 0; i < 2000; i++)
+                {
+                    var recoveredValue = db.StringGet($"SeSaveRecoverTestKey{i:0000}");
+                    Assert.AreEqual("SeSaveRecoverTestValue", recoveredValue.ToString(), $"Key SeSaveRecoverTestKey{i:0000}");
+                }
+            }
+        }
 
         [Test]
         public void SeAofRecoverTest()
@@ -351,9 +462,9 @@ namespace Garnet.test
             string[] p = default;
 
             if (async && unsafetruncatelog)
-                p = new string[] { "ASYNC", "UNSAFETRUNCATELOG" };
+                p = ["ASYNC", "UNSAFETRUNCATELOG"];
             else if (unsafetruncatelog)
-                p = new string[] { "UNSAFETRUNCATELOG" };
+                p = ["UNSAFETRUNCATELOG"];
 
             if (async)
             {
@@ -373,6 +484,59 @@ namespace Garnet.test
             Assert.IsTrue(_value.IsNull);
         }
 
+        [Test]
+        [TestCase("timeout", "0")]
+        [TestCase("save", "")]
+        [TestCase("appendonly", "no")]
+        [TestCase("slave-read-only", "no")]
+        [TestCase("databases", "16")]
+        [TestCase("cluster-node-timeout", "60")]
+        public void SimpleConfigGet(string parameter, string parameterValue)
+        {
+            using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
+            var db = redis.GetDatabase(0);
+
+            var result = (string[])db.Execute("CONFIG", "GET", parameter);
+
+            Assert.AreEqual(parameter, result[0]);
+            Assert.AreEqual(parameterValue, result[1]);
+        }
+
+        #endregion
+
+        #region NegativeTests
+
+        [Test]
+        public void ConfigWrongNumberOfArguments()
+        {
+            using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
+            var db = redis.GetDatabase(0);
+            try
+            {
+                db.Execute("CONFIG");
+                Assert.Fail("Shouldn't be reachable, command is incorrect");
+            }
+            catch (Exception ex)
+            {
+                Assert.AreEqual("ERR wrong number of arguments for 'config' command", ex.Message);
+            }
+        }
+
+        [Test]
+        public void ConfigGetWrongNumberOfArguments()
+        {
+            using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
+            var db = redis.GetDatabase(0);
+            try
+            {
+                db.Execute("CONFIG", "GET");
+                Assert.Fail("Shouldn't be reachable, command is incorrect");
+            }
+            catch (Exception ex)
+            {
+                Assert.AreEqual("ERR wrong number of arguments for 'config|get' command", ex.Message);
+            }
+        }
         #endregion
     }
 }

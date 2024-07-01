@@ -10,29 +10,10 @@ namespace Garnet.server
     /// <summary>
     /// Object store functions
     /// </summary>
-    public readonly unsafe partial struct ObjectStoreFunctions : IFunctions<byte[], IGarnetObject, SpanByte, GarnetObjectStoreOutput, long>
+    public readonly unsafe partial struct ObjectStoreFunctions : ISessionFunctions<byte[], IGarnetObject, SpanByte, GarnetObjectStoreOutput, long>
     {
         /// <inheritdoc />
         public bool SingleReader(ref byte[] key, ref SpanByte input, ref IGarnetObject value, ref GarnetObjectStoreOutput dst, ref ReadInfo readInfo)
-        {
-            if (value.Expiration > 0 && value.Expiration < DateTimeOffset.Now.Ticks)
-                return false;
-
-            var header = (RespInputHeader*)input.ToPointer();
-            if (header->type == GarnetObjectType.Ttl || header->type == GarnetObjectType.PTtl) // TTL command
-            {
-                long ttlValue = header->type == GarnetObjectType.Ttl ?
-                                ConvertUtils.SecondsFromDiffUtcNowTicks(value.Expiration > 0 ? value.Expiration : -1) :
-                                ConvertUtils.MillisecondsFromDiffUtcNowTicks(value.Expiration > 0 ? value.Expiration : -1);
-                CopyRespNumber(ttlValue, ref dst.spanByteAndMemory);
-                return true;
-            }
-
-            return value.Operate(ref input, ref dst.spanByteAndMemory, out _);
-        }
-
-        /// <inheritdoc />
-        public bool ConcurrentReader(ref byte[] key, ref SpanByte input, ref IGarnetObject value, ref GarnetObjectStoreOutput dst, ref ReadInfo readInfo, ref RecordInfo recordInfo)
         {
             if (value.Expiration > 0 && value.Expiration < DateTimeOffset.Now.UtcTicks)
             {
@@ -52,11 +33,15 @@ namespace Garnet.server
                     CopyRespNumber(ttlValue, ref dst.spanByteAndMemory);
                     return true;
                 }
-                return value.Operate(ref input, ref dst.spanByteAndMemory, out _);
+                return value.Operate(ref input, ref dst.spanByteAndMemory, out _, out _);
             }
 
             dst.garnetObject = value;
             return true;
         }
+
+        /// <inheritdoc />
+        public bool ConcurrentReader(ref byte[] key, ref SpanByte input, ref IGarnetObject value, ref GarnetObjectStoreOutput dst, ref ReadInfo readInfo, ref RecordInfo recordInfo)
+            => SingleReader(ref key, ref input, ref value, ref dst, ref readInfo);
     }
 }

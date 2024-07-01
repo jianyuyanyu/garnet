@@ -51,9 +51,9 @@ namespace Garnet.server
 
         public ulong get_total_read_commands_processed() => 0;
 
-        public void incr_total_number_resp_server_session_exceptions(ulong count) { }
+        public static void incr_total_number_resp_server_session_exceptions(ulong count) { }
 
-        public ulong get_total_number_resp_server_session_exceptions() => 0;
+        public static ulong get_total_number_resp_server_session_exceptions() => 0;
     }
 
     /// <summary>
@@ -253,12 +253,6 @@ namespace Garnet.server
         public void add_total_write_commands_processed(ulong count) => total_write_commands_processed += count;
 
         /// <summary>
-        /// Increment total write commands processed
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void incr_total_write_commands_processed(byte cmd) => total_write_commands_processed += (ulong)((cmd & 0x80) >> 7);
-
-        /// <summary>
         /// Get total_write_commands_processed
         /// </summary>
         /// <returns></returns>
@@ -271,12 +265,6 @@ namespace Garnet.server
         /// <param name="count"></param>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void add_total_read_commands_processed(ulong count) => total_read_commands_processed += count;
-
-        /// <summary>
-        /// Increment total read commands processed
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void incr_total_read_commands_processed(byte cmd) => total_read_commands_processed += (ulong)((cmd & 0x40) >> 6);
 
         /// <summary>
         /// Get total_read_commands_processed

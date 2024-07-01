@@ -8,14 +8,14 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Threading.Tasks.Sources;
 
-namespace FASTER.core
+namespace Tsavorite.core
 {
     /// <summary>
     /// Represents a synchronization event that, when signaled, resets automatically after releasing a single waiter.
     /// This type supports concurrent signallers but only a single waiter.
     /// Based on https://github.com/dotnet/orleans/blob/main/src/Orleans.Runtime/Versions/SingleWaiterAutoResetEvent.cs
     /// </summary>
-    internal sealed class SingleWaiterAutoResetEvent : IValueTaskSource
+    public sealed class SingleWaiterAutoResetEvent : IValueTaskSource
     {
         // Signaled indicates that the event has been signaled and not yet reset.
         private const uint SignaledFlag = 1;
@@ -55,6 +55,12 @@ namespace FASTER.core
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void Signal()
         {
+            if ((_status & SignaledFlag) == SignaledFlag)
+            {
+                // The event is already signaled.
+                return;
+            }
+
             // Set the signaled flag.
             var status = Interlocked.Or(ref _status, SignaledFlag);
 

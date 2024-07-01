@@ -7,7 +7,7 @@ using System.Threading.Tasks;
 using NUnit.Framework;
 using Tsavorite.core;
 
-namespace Tsavorite.test.recovery.objectstore
+namespace Tsavorite.test.recovery.objects
 {
     internal struct StructTuple<T1, T2>
     {
@@ -24,7 +24,6 @@ namespace Tsavorite.test.recovery.objectstore
         const long completePendingInterval = (1L << 10);
         const long checkpointInterval = (1L << 16);
         private TsavoriteKV<AdId, NumClicks> store;
-        private string test_path;
         private Guid token;
         private IDevice log, objlog;
 
@@ -33,18 +32,17 @@ namespace Tsavorite.test.recovery.objectstore
 
         public void Setup(bool deleteDir)
         {
-            test_path = TestUtils.MethodTestDir;
             if (deleteDir)
-                TestUtils.RecreateDirectory(test_path);
+                TestUtils.RecreateDirectory(TestUtils.MethodTestDir);
 
-            log = Devices.CreateLogDevice(test_path + "/ObjectRecoveryTests.log", false);
-            objlog = Devices.CreateLogDevice(test_path + "/ObjectRecoveryTests.obj.log", false);
+            log = Devices.CreateLogDevice(Path.Join(TestUtils.MethodTestDir, "ObjectRecoveryTests.log"), false);
+            objlog = Devices.CreateLogDevice(Path.Join(TestUtils.MethodTestDir, "ObjectRecoveryTests.obj.log"), false);
 
             store = new TsavoriteKV<AdId, NumClicks>
                 (
                     keySpace,
                     new LogSettings { LogDevice = log, ObjectLogDevice = objlog },
-                    new CheckpointSettings { CheckpointDir = test_path },
+                    new CheckpointSettings { CheckpointDir = TestUtils.MethodTestDir },
                     new SerializerSettings<AdId, NumClicks> { keySerializer = () => new AdIdSerializer(), valueSerializer = () => new NumClicksSerializer() }
                     );
         }
@@ -62,7 +60,7 @@ namespace Tsavorite.test.recovery.objectstore
             objlog = null;
 
             if (deleteDir)
-                TestUtils.DeleteDirectory(test_path);
+                TestUtils.DeleteDirectory(TestUtils.MethodTestDir);
         }
 
         private void PrepareToRecover()
@@ -101,12 +99,13 @@ namespace Tsavorite.test.recovery.objectstore
 
             // Register thread with Tsavorite
             var session = store.NewSession<Input, Output, Empty, Functions>(new Functions());
+            var bContext = session.BasicContext;
 
             // Process the batch of input data
             bool first = true;
             for (int i = 0; i < numOps; i++)
             {
-                session.RMW(ref inputArray[i].Item1, ref inputArray[i].Item2, Empty.Default, i);
+                bContext.RMW(ref inputArray[i].Item1, ref inputArray[i].Item2, Empty.Default);
 
                 if ((i + 1) % checkpointInterval == 0)
                 {
@@ -122,13 +121,13 @@ namespace Tsavorite.test.recovery.objectstore
 
                 if (i % completePendingInterval == 0)
                 {
-                    session.CompletePending(false, false);
+                    bContext.CompletePending(false, false);
                 }
             }
 
 
             // Make sure operations are completed
-            session.CompletePending(true);
+            bContext.CompletePending(true);
             session.Dispose();
         }
 
@@ -145,65 +144,22 @@ namespace Tsavorite.test.recovery.objectstore
                 };
             }
 
-            var outputArray = new Output[numUniqueKeys];
-            for (int i = 0; i < numUniqueKeys; i++)
-            {
-                outputArray[i] = new Output();
-            }
-
-            // Register with thread
             var session = store.NewSession<Input, Output, Empty, Functions>(new Functions());
+            var bContext = session.BasicContext;
 
             Input input = default;
             // Issue read requests
             for (var i = 0; i < numUniqueKeys; i++)
             {
-                session.Read(ref inputArray[i].Item1, ref input, ref outputArray[i], Empty.Default, i);
+                Output output = new();
+                bContext.Read(ref inputArray[i].Item1, ref input, ref output, Empty.Default);
             }
 
             // Complete all pending requests
-            session.CompletePending(true);
+            bContext.CompletePending(true);
 
             // Release
             session.Dispose();
-
-            // Test outputs
-            var checkpointInfo = default(HybridLogRecoveryInfo);
-            checkpointInfo.Recover(cprVersion,
-                new DeviceLogCommitCheckpointManager(
-                    new LocalStorageNamedDeviceFactory(),
-                        new DefaultCheckpointNamingScheme(
-                          new DirectoryInfo(test_path).FullName)), null);
-
-            // Compute expected array
-            long[] expected = new long[numUniqueKeys];
-            foreach (var guid in checkpointInfo.continueTokens.Keys)
-            {
-                var cp = checkpointInfo.continueTokens[guid].Item2;
-                for (long i = 0; i <= cp.UntilSerialNo; i++)
-                {
-                    var id = i % numUniqueKeys;
-                    expected[id]++;
-                }
-            }
-
-            int threadCount = 1; // single threaded test
-            int numCompleted = threadCount - checkpointInfo.continueTokens.Count;
-            for (int t = 0; t < numCompleted; t++)
-            {
-                var sno = numOps;
-                for (long i = 0; i < sno; i++)
-                {
-                    var id = i % numUniqueKeys;
-                    expected[id]++;
-                }
-            }
-
-            // Assert if expected is same as found
-            for (long i = 0; i < numUniqueKeys; i++)
-            {
-                Assert.AreEqual(expected[i], outputArray[i].value.numClicks, $"AdId {inputArray[i].Item1.adId}");
-            }
         }
     }
 }

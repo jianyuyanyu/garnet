@@ -10,16 +10,14 @@ Check out our blog post [here](/blog/brief-history) for more details on our hist
 
 ## Contributors
 
-Badrish Chandramouli, Vasileios Zois, Ted Hart, Gabriela Martinez Sanchez, Yoganand Rajasekaran, Tal Zaccai, Lukas Maas.
+Core Team:
+* Badrish Chandramouli, Vasileios Zois, Ted Hart, Yoganand Rajasekaran, Tal Zaccai, Lukas Maas, Darren Gehring.
+* Email: garnetteam AT microsoft.com
 
-Darren Gehring, Irina Spiridonova.
+Project Partners:
+* Alan Yang, Pradeep Yadav, Alex Dubinkov, Venugopal Latchupatulla.
+* Knut Magne Risvik, Sarah Williamson, Narayanan Subramanian, Saurabh Singh, Padmanabh Gupta.
+* Kevin Montrose, Matt Tremblay, Marc Gravell.
+* Paulus Pärssinen.
+* Open-source and prior contributors to the [Garnet](https://github.com/microsoft/garnet/contributors) and [FASTER](https://github.com/microsoft/FASTER/contributors) projects.
 
-Alan Yang, Pradeep Yadav, Alex Dubinkov, Venugopal Latchupatulla.
-
-Knut Magne Risvik, Sarah Williamson, Narayanan Subramanian, Saurabh Singh, Padmanabh Gupta.
-
-Sajjad Rahnama.
-
-Prior contributors to the [FASTER](https://github.com/microsoft/FASTER) research project.
-
-You can contact us at garnetteam AT microsoft.com

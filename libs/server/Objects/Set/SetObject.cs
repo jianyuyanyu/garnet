@@ -23,6 +23,15 @@ namespace Garnet.server
         SMEMBERS,
         SCARD,
         SSCAN,
+        SMOVE,
+        SRANDMEMBER,
+        SISMEMBER,
+        SUNION,
+        SUNIONSTORE,
+        SDIFF,
+        SDIFFSTORE,
+        SINTER,
+        SINTERSTORE
     }
 
 
@@ -39,7 +48,7 @@ namespace Garnet.server
         public SetObject(long expiration = 0)
             : base(expiration, MemoryUtils.HashSetOverhead)
         {
-            set = new HashSet<byte[]>(new ByteArrayComparer());
+            set = new HashSet<byte[]>(ByteArrayComparer.Instance);
         }
 
         /// <summary>
@@ -48,7 +57,7 @@ namespace Garnet.server
         public SetObject(BinaryReader reader)
             : base(reader, MemoryUtils.HashSetOverhead)
         {
-            set = new HashSet<byte[]>(new ByteArrayComparer());
+            set = new HashSet<byte[]>(ByteArrayComparer.Instance);
 
             int count = reader.ReadInt32();
             for (int i = 0; i < count; i++)
@@ -95,13 +104,21 @@ namespace Garnet.server
         public override GarnetObjectBase Clone() => new SetObject(set, Expiration, Size);
 
         /// <inheritdoc />
-        public override unsafe bool Operate(ref SpanByte input, ref SpanByteAndMemory output, out long sizeChange)
+        public override unsafe bool Operate(ref SpanByte input, ref SpanByteAndMemory output, out long sizeChange, out bool removeKey)
         {
             fixed (byte* _input = input.AsSpan())
             fixed (byte* _output = output.SpanByte.AsSpan())
             {
                 var header = (RespInputHeader*)_input;
-                Debug.Assert(header->type == GarnetObjectType.Set);
+                if (header->type != GarnetObjectType.Set)
+                {
+                    // Indicates an incorrect type of key
+                    output.Length = 0;
+                    sizeChange = 0;
+                    removeKey = false;
+                    return true;
+                }
+
                 long prevSize = this.Size;
                 switch (header->SetOp)
                 {
@@ -111,6 +128,9 @@ namespace Garnet.server
                     case SetOperation.SMEMBERS:
                         SetMembers(_input, input.Length, ref output);
                         break;
+                    case SetOperation.SISMEMBER:
+                        SetIsMember(_input, input.Length, ref output);
+                        break;
                     case SetOperation.SREM:
                         SetRemove(_input, input.Length, _output);
                         break;
@@ -119,6 +139,9 @@ namespace Garnet.server
                         break;
                     case SetOperation.SPOP:
                         SetPop(_input, input.Length, ref output);
+                        break;
+                    case SetOperation.SRANDMEMBER:
+                        SetRandomMember(_input, ref output);
                         break;
                     case SetOperation.SSCAN:
                         if (ObjectUtils.ReadScanInput(_input, input.Length, ref output, out var cursorInput, out var pattern, out var patternLength, out int limitCount, out int bytesDone))
@@ -132,10 +155,12 @@ namespace Garnet.server
                 }
                 sizeChange = this.Size - prevSize;
             }
+
+            removeKey = set.Count == 0;
             return true;
         }
 
-        private void UpdateSize(byte[] item, bool add = true)
+        internal void UpdateSize(ReadOnlySpan<byte> item, bool add = true)
         {
             var size = Utility.RoundUp(item.Length, IntPtr.Size) + MemoryUtils.ByteArrayOverhead + MemoryUtils.HashSetEntryOverhead;
             this.Size += add ? size : -size;
@@ -188,5 +213,7 @@ namespace Garnet.server
             if (cursor == set.Count)
                 cursor = 0;
         }
+
+        public HashSet<byte[]> Set => set;
     }
 }

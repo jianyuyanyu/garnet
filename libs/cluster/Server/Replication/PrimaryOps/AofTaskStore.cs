@@ -14,7 +14,7 @@ namespace Garnet.cluster
     /// <summary>
     /// Storage provider for AOF tasks
     /// </summary>
-    internal class AofTaskStore : IDisposable
+    internal sealed class AofTaskStore : IDisposable
     {
         readonly ClusterProvider clusterProvider;
         readonly ILogger logger;
@@ -129,7 +129,7 @@ namespace Garnet.cluster
                 aofSyncTaskInfo = new AofSyncTaskInfo(
                     clusterProvider,
                     this,
-                    current.GetLocalNodeId(),
+                    current.LocalNodeId,
                     remoteNodeId,
                     new GarnetClientSession(address, port, clusterProvider.serverOptions.TlsOptions?.TlsClientOptions, authUsername: clusterProvider.ClusterUsername, authPassword: clusterProvider.ClusterPassword, 1 << 22, logger: logger),
                     new CancellationTokenSource(),

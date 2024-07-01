@@ -4,11 +4,12 @@
 using System;
 using System.Buffers;
 using System.Diagnostics;
-using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using Garnet.common;
+using Garnet.common.Parsing;
 using Garnet.networking;
 using Garnet.server.ACL;
 using Garnet.server.Auth;
@@ -54,9 +55,26 @@ namespace Garnet.server
         internal readonly TransactionManager txnManager;
         readonly ScratchBufferManager scratchBufferManager;
 
+        SessionParseState parseState;
+        ClusterSlotVerificationInput csvi;
         GCHandle recvHandle;
+
+        /// <summary>
+        /// Pointer to the (fixed) receive buffer
+        /// </summary>
         byte* recvBufferPtr;
+
+        /// <summary>
+        /// Current readHead. On successful parsing, this is left at the start of 
+        /// the command payload for use by legacy operators.
+        /// </summary>
         int readHead;
+
+        /// <summary>
+        /// End of the current command, after successful parsing.
+        /// </summary>
+        int endReadHead;
+
         byte* dcurr, dend;
         bool toDispose;
 
@@ -64,6 +82,7 @@ namespace Garnet.server
         public readonly StorageSession storageSession;
         internal BasicGarnetApi basicGarnetApi;
         internal LockableGarnetApi lockableGarnetApi;
+        internal CollectionItemBroker itemBroker;
 
         readonly IGarnetAuthenticator _authenticator;
 
@@ -89,10 +108,41 @@ namespace Garnet.server
         /// </summary>
         public readonly IClusterSession clusterSession;
 
+        /// <summary>
+        /// Current custom transaction to be executed in the session.
+        /// </summary>
+        CustomTransaction currentCustomTransaction = null;
+
+        /// <summary>
+        /// Current custom command to be executed in the session.
+        /// </summary>
+        CustomCommand currentCustomCommand = null;
+
+        /// <summary>
+        /// Current custom object command to be executed in the session.
+        /// </summary>
+        CustomObjectCommand currentCustomObjectCommand = null;
+
+        /// <summary>
+        /// RESP protocol version (RESP2 is the default)
+        /// </summary>
+        byte respProtocolVersion = 2;
+
+        /// <summary>
+        /// Client name for the session
+        /// </summary>
+        string clientName = null;
+
+        /// <summary>
+        /// Random number generator for operations, using a cryptographic generator as the base seed
+        /// </summary>
+        private static readonly Random RandomGen = new(RandomNumberGenerator.GetInt32(int.MaxValue));
+
         public RespServerSession(
             INetworkSender networkSender,
             StoreWrapper storeWrapper,
-            SubscribeBroker<SpanByte, SpanByte, IKeySerializer<SpanByte>> subscribeBroker)
+            SubscribeBroker<SpanByte, SpanByte, IKeySerializer<SpanByte>> subscribeBroker,
+            CollectionItemBroker itemBroker)
             : base(networkSender)
         {
             this.customCommandManagerSession = new CustomCommandManagerSession(storeWrapper.customCommandManager);
@@ -106,13 +156,14 @@ namespace Garnet.server
             this.scratchBufferManager = new ScratchBufferManager();
 
             // Create storage session and API
-            this.storageSession = new StorageSession(storeWrapper, scratchBufferManager, sessionMetrics, LatencyMetrics, logger);
+            this.storageSession = new StorageSession(storeWrapper, scratchBufferManager, sessionMetrics, LatencyMetrics, itemBroker, logger);
 
             this.basicGarnetApi = new BasicGarnetApi(storageSession, storageSession.basicContext, storageSession.objectStoreBasicContext);
             this.lockableGarnetApi = new LockableGarnetApi(storageSession, storageSession.lockableContext, storageSession.objectStoreLockableContext);
 
             this.storeWrapper = storeWrapper;
             this.subscribeBroker = subscribeBroker;
+            this.itemBroker = itemBroker;
             this._authenticator = storeWrapper.serverOptions.AuthSettings?.CreateAuthenticator(this.storeWrapper) ?? new GarnetNoAuthAuthenticator();
 
             // Associate new session with default user and automatically authenticate, if possible
@@ -122,6 +173,9 @@ namespace Garnet.server
             storageSession.txnManager = txnManager;
 
             clusterSession = storeWrapper.clusterProvider?.CreateClusterSession(txnManager, this._authenticator, this._user, sessionMetrics, basicGarnetApi, networkSender, logger);
+            clusterSession?.SetUser(this._user);
+
+            parseState.Initialize();
             readHead = 0;
             toDispose = false;
             SessionAsking = 0;
@@ -147,6 +201,11 @@ namespace Garnet.server
                 storeWrapper.monitor.AddMetricsHistory(sessionMetrics, latencyMetrics);
 
             subscribeBroker?.RemoveSubscription(this);
+            itemBroker?.HandleSessionDisposed(this);
+
+            // Cancel the async processor, if any
+            asyncWaiterCancel?.Cancel();
+            asyncWaiter?.Signal();
 
             storageSession.Dispose();
         }
@@ -162,7 +221,7 @@ namespace Garnet.server
         /// <returns>True if the session has been authenticated successfully, false if the user could not be authenticated.</returns>
         bool AuthenticateUser(ReadOnlySpan<byte> username, ReadOnlySpan<byte> password = default(ReadOnlySpan<byte>))
         {
-            // Authenticate user or change to default user if no authentication is supported 
+            // Authenticate user or change to default user if no authentication is supported
             bool success = _authenticator.CanAuthenticate ? _authenticator.Authenticate(password, username) : true;
 
             if (success)
@@ -195,20 +254,52 @@ namespace Garnet.server
                 latencyMetrics?.Start(LatencyMetricsType.NET_RS_LAT);
                 clusterSession?.AcquireCurrentEpoch();
                 recvBufferPtr = reqBuffer;
-                networkSender.GetResponseObject();
+                networkSender.EnterAndGetResponseObject(out dcurr, out dend);
                 ProcessMessages();
                 recvBufferPtr = null;
+            }
+            catch (RespParsingException ex)
+            {
+                sessionMetrics?.incr_total_number_resp_server_session_exceptions(1);
+                logger?.Log(ex.LogLevel, ex, "Aborting open session due to RESP parsing error");
+
+                // Forward parsing error as RESP error
+                while (!RespWriteUtils.WriteError($"ERR Protocol Error: {ex.Message}", ref dcurr, dend))
+                    SendAndReset();
+
+                // Send message and dispose the network sender to end the session
+                if (dcurr > networkSender.GetResponseObjectHead())
+                    Send(networkSender.GetResponseObjectHead());
+
+                // The session is no longer usable, dispose it
+                networkSender.DisposeNetworkSender(true);
+            }
+            catch (GarnetException ex)
+            {
+                sessionMetrics?.incr_total_number_resp_server_session_exceptions(1);
+                logger?.Log(ex.LogLevel, ex, "ProcessMessages threw a GarnetException:");
+
+                // Forward Garnet error as RESP error
+                while (!RespWriteUtils.WriteError($"ERR Garnet Exception: {ex.Message}", ref dcurr, dend))
+                    SendAndReset();
+
+                // Send message and dispose the network sender to end the session
+                if (dcurr > networkSender.GetResponseObjectHead())
+                    Send(networkSender.GetResponseObjectHead());
+
+                // The session is no longer usable, dispose it
+                networkSender.DisposeNetworkSender(true);
             }
             catch (Exception ex)
             {
                 sessionMetrics?.incr_total_number_resp_server_session_exceptions(1);
-                logger?.LogCritical(ex, "ProcessMessages threw exception");
+                logger?.LogCritical(ex, "ProcessMessages threw an exception:");
                 // The session is no longer usable, dispose it
                 networkSender.Dispose();
             }
             finally
             {
-                networkSender.ReturnResponseObject();
+                networkSender.ExitAndReturnResponseObject();
                 clusterSession?.ReleaseCurrentEpoch();
             }
 
@@ -240,55 +331,65 @@ namespace Garnet.server
         {
             // #if DEBUG
             // logger?.LogTrace("RECV: [{recv}]", Encoding.UTF8.GetString(new Span<byte>(recvBufferPtr, bytesRead)).Replace("\n", "|").Replace("\r", ""));
+            // Debug.WriteLine($"RECV: [{Encoding.UTF8.GetString(new Span<byte>(recvBufferPtr, bytesRead)).Replace("\n", "|").Replace("\r", "")}]");
             // #endif
-
-            dcurr = networkSender.GetResponseObjectHead();
-            dend = networkSender.GetResponseObjectTail();
 
             var _origReadHead = readHead;
 
             while (bytesRead - readHead >= 4)
             {
-                var ptr = recvBufferPtr + readHead;
-                var cmd = _authenticator.IsAuthenticated ? FastParseCommand(ptr) : RespCommand.NOAUTH;
-                if (cmd == RespCommand.NONE && MakeUpperCase(ptr)) continue;
+                // First, parse the command, making sure we have the entire command available
+                // We use endReadHead to track the end of the current command
+                // On success, readHead is left at the start of the command payload for legacy operators
+                var cmd = ParseCommand(out bool commandReceived);
 
-                bool success;
-                if (txnManager.state != TxnState.None)
+                // If the command was not fully received, reset addresses and break out
+                if (!commandReceived)
                 {
-                    if (txnManager.state == TxnState.Running)
+                    endReadHead = readHead = _origReadHead;
+                    break;
+                }
+
+                // Check ACL permissions for the command
+                if (cmd != RespCommand.INVALID && CheckACLPermissions(cmd))
+                {
+                    if (txnManager.state != TxnState.None)
                     {
-                        success = ProcessBasicCommands(ptr, cmd, ref lockableGarnetApi);
+                        if (txnManager.state == TxnState.Running)
+                        {
+                            _ = ProcessBasicCommands(cmd, ref lockableGarnetApi);
+                        }
+                        else _ = cmd switch
+                        {
+                            RespCommand.EXEC => NetworkEXEC(),
+                            RespCommand.MULTI => NetworkMULTI(),
+                            RespCommand.DISCARD => NetworkDISCARD(),
+                            RespCommand.QUIT => NetworkQUIT(),
+                            _ => NetworkSKIP(cmd),
+                        };
                     }
-                    else success = cmd switch
+                    else
                     {
-                        RespCommand.EXEC => NetworkEXEC(),
-                        RespCommand.MULTI => NetworkMULTI(),
-                        RespCommand.DISCARD => NetworkDISCARD(),
-                        _ => NetworkSKIP(cmd),
-                    };
+                        _ = ProcessBasicCommands(cmd, ref basicGarnetApi);
+                    }
                 }
-                else
-                {
-                    success = ProcessBasicCommands(ptr, cmd, ref basicGarnetApi);
-                }
-                if (!success) break;
+
+                // Advance read head variables to process the next command
+                _origReadHead = readHead = endReadHead;
+
+                // Handle metrics and special cases
                 if (latencyMetrics != null) opCount++;
                 if (sessionMetrics != null)
                 {
                     sessionMetrics.total_commands_processed++;
-                    sessionMetrics.total_write_commands_processed += (ulong)(((byte)cmd & 0x80) >> 7);
-                    sessionMetrics.total_read_commands_processed += (ulong)(((byte)cmd & 0x40) >> 6);
 
-                    //sessionMetrics.incr_total_commands_processed(1);
-                    //sessionMetrics.incr_total_write_commands_processed((byte)cmd);
-                    //sessionMetrics.incr_total_read_commands_processed((byte)cmd);
+                    sessionMetrics.total_write_commands_processed += cmd.OneIfWrite();
+                    sessionMetrics.total_read_commands_processed += cmd.OneIfRead();
                 }
-
-                _origReadHead = readHead;
-                SessionAsking = (byte)(SessionAsking == 0 ? SessionAsking : SessionAsking - 1);
+                if (SessionAsking != 0)
+                    SessionAsking = (byte)(SessionAsking - 1);
             }
-            readHead = _origReadHead;
+
             if (dcurr > networkSender.GetResponseObjectHead())
             {
                 Send(networkSender.GetResponseObjectHead());
@@ -321,21 +422,23 @@ namespace Garnet.server
             return false;
         }
 
-        private bool ProcessBasicCommands<TGarnetApi>(byte* ptr, RespCommand cmd, ref TGarnetApi storageApi)
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private bool ProcessBasicCommands<TGarnetApi>(RespCommand cmd, ref TGarnetApi storageApi)
             where TGarnetApi : IGarnetApi
         {
-            bool success = cmd switch
+            var ptr = recvBufferPtr + readHead;
+            _ = cmd switch
             {
-                RespCommand.GET => NetworkGET(ptr, ref storageApi),
-                RespCommand.SET => NetworkSET(ptr, ref storageApi),
-                RespCommand.SETEX => NetworkSETEX(ptr, false, ref storageApi),
-                RespCommand.PSETEX => NetworkSETEX(ptr, true, ref storageApi),
-                RespCommand.SETEXNX => NetworkSETEXNX(ptr, ref storageApi),
-                RespCommand.DEL => NetworkDEL(ptr, ref storageApi),
+                RespCommand.GET => NetworkGET(ref storageApi),
+                RespCommand.SET => NetworkSET(ref storageApi),
+                RespCommand.SETEX => NetworkSETEX(false, ref storageApi),
+                RespCommand.PSETEX => NetworkSETEX(true, ref storageApi),
+                RespCommand.SETEXNX => NetworkSETEXNX(parseState.count, ptr, ref storageApi),
+                RespCommand.DEL => NetworkDEL(ref storageApi),
                 RespCommand.RENAME => NetworkRENAME(ptr, ref storageApi),
-                RespCommand.EXISTS => NetworkEXISTS(ptr, ref storageApi),
-                RespCommand.EXPIRE => NetworkEXPIRE(ptr, RespCommand.EXPIRE, ref storageApi),
-                RespCommand.PEXPIRE => NetworkEXPIRE(ptr, RespCommand.PEXPIRE, ref storageApi),
+                RespCommand.EXISTS => NetworkEXISTS(parseState.count, ptr, ref storageApi),
+                RespCommand.EXPIRE => NetworkEXPIRE(parseState.count, ptr, RespCommand.EXPIRE, ref storageApi),
+                RespCommand.PEXPIRE => NetworkEXPIRE(parseState.count, ptr, RespCommand.PEXPIRE, ref storageApi),
                 RespCommand.PERSIST => NetworkPERSIST(ptr, ref storageApi),
                 RespCommand.GETRANGE => NetworkGetRange(ptr, ref storageApi),
                 RespCommand.TTL => NetworkTTL(ptr, RespCommand.TTL, ref storageApi),
@@ -343,299 +446,276 @@ namespace Garnet.server
                 RespCommand.SETRANGE => NetworkSetRange(ptr, ref storageApi),
                 RespCommand.GETDEL => NetworkGETDEL(ptr, ref storageApi),
                 RespCommand.APPEND => NetworkAppend(ptr, ref storageApi),
-
                 RespCommand.INCR => NetworkIncrement(ptr, RespCommand.INCR, ref storageApi),
                 RespCommand.INCRBY => NetworkIncrement(ptr, RespCommand.INCRBY, ref storageApi),
                 RespCommand.DECR => NetworkIncrement(ptr, RespCommand.DECR, ref storageApi),
                 RespCommand.DECRBY => NetworkIncrement(ptr, RespCommand.DECRBY, ref storageApi),
-
-                RespCommand.SETBIT => StringSetBit(ptr, ref storageApi),
-                RespCommand.GETBIT => StringGetBit(ptr, ref storageApi),
-                RespCommand.BITCOUNT => StringBitCount(ptr, ref storageApi),
-                RespCommand.BITPOS => StringBitPosition(ptr, ref storageApi),
-
+                RespCommand.SETBIT => NetworkStringSetBit(ptr, ref storageApi),
+                RespCommand.GETBIT => NetworkStringGetBit(ptr, ref storageApi),
+                RespCommand.BITCOUNT => NetworkStringBitCount(ptr, parseState.count, ref storageApi),
+                RespCommand.BITPOS => NetworkStringBitPosition(ptr, parseState.count, ref storageApi),
                 RespCommand.PUBLISH => NetworkPUBLISH(ptr),
-                RespCommand.PING => NetworkPING(),
+                RespCommand.PING => parseState.count == 0 ? NetworkPING() : ProcessArrayCommands(cmd, ref storageApi),
                 RespCommand.ASKING => NetworkASKING(),
                 RespCommand.MULTI => NetworkMULTI(),
                 RespCommand.EXEC => NetworkEXEC(),
                 RespCommand.UNWATCH => NetworkUNWATCH(),
                 RespCommand.DISCARD => NetworkDISCARD(),
                 RespCommand.QUIT => NetworkQUIT(),
-                RespCommand.RUNTXP => NetworkRUNTXPFast(ptr),
+                RespCommand.RUNTXP => NetworkRUNTXP(parseState.count, ptr),
                 RespCommand.READONLY => NetworkREADONLY(),
                 RespCommand.READWRITE => NetworkREADWRITE(),
-                _ => ProcessArrayCommands(ref storageApi),
+                RespCommand.COMMAND => NetworkCOMMAND(ptr, parseState.count),
+                RespCommand.COMMAND_COUNT => NetworkCOMMAND_COUNT(ptr, parseState.count),
+                RespCommand.COMMAND_INFO => NetworkCOMMAND_INFO(ptr, parseState.count),
+
+                _ => ProcessArrayCommands(cmd, ref storageApi)
             };
-            return success;
+
+            return true;
         }
 
-        private bool ProcessArrayCommands<TGarnetApi>(ref TGarnetApi storageApi)
+        private bool ProcessArrayCommands<TGarnetApi>(RespCommand cmd, ref TGarnetApi storageApi)
            where TGarnetApi : IGarnetApi
         {
-            if (*(recvBufferPtr + readHead) != '*')
-            {
-                if (bytesRead - readHead < 2) return false;
-                if (*(ushort*)(recvBufferPtr + bytesRead - 2) != 2573)
-                    return false;
-                readHead = bytesRead;
-                while (!RespWriteUtils.WriteResponse(CmdStrings.RESP_ERR, ref dcurr, dend))
-                    SendAndReset();
-                return true;
-            }
+            int count = parseState.count;
 
-            var tmp = recvBufferPtr + readHead;
-            if (!RespReadUtils.ReadArrayLength(out int count, ref tmp, recvBufferPtr + bytesRead))
-                return false;
-            readHead += (int)(tmp - (recvBufferPtr + readHead));
+            // Continue reading from the current read head.
+            byte* ptr = recvBufferPtr + readHead;
 
-            if (!_authenticator.IsAuthenticated) return ProcessOtherCommands(count, ref storageApi);
-
-            var ptr = recvBufferPtr + readHead;
-            var cmd = FastParseArrayCommand(count, recvBufferPtr + readHead);
             var success = cmd switch
             {
-                (RespCommand.MGET, 0) => NetworkMGET(count, ptr, ref storageApi),
-                (RespCommand.MSET, 0) => NetworkMSET(count, ptr, ref storageApi),
-                (RespCommand.MSETNX, 0) => NetworkMSETNX(count, ptr, ref storageApi),
-                (RespCommand.DEL, 0) => NetworkDEL(count, ptr, false, ref storageApi),
-                (RespCommand.UNLINK, 0) => NetworkDEL(count, ptr, true, ref storageApi),
-                (RespCommand.SELECT, 0) => NetworkSELECT(ptr),
-                (RespCommand.WATCH, 0) => NetworkWATCH(count, ptr),
-                (RespCommand.WATCHMS, 0) => NetworkWATCH(count, ptr, StoreType.Main),
-                (RespCommand.WATCHOS, 0) => NetworkWATCH(count, ptr, StoreType.Object),
-                (RespCommand.STRLEN, 0) => NetworkSTRLEN(ptr, ref storageApi),
-                (RespCommand.EXISTS, 0) => NetworkEXISTS(count, ptr, ref storageApi),
-                (RespCommand.MODULE, 0) => NetworkMODULE(ptr, ref storageApi),
+                RespCommand.MGET => NetworkMGET(ref storageApi),
+                RespCommand.MSET => NetworkMSET(ref storageApi),
+                RespCommand.MSETNX => NetworkMSETNX(ref storageApi),
+                RespCommand.UNLINK => NetworkDEL(ref storageApi),
+                RespCommand.SELECT => NetworkSELECT(ptr),
+                RespCommand.WATCH => NetworkWATCH(count),
+                RespCommand.WATCH_MS => NetworkWATCH_MS(count),
+                RespCommand.WATCH_OS => NetworkWATCH_OS(count),
+                RespCommand.STRLEN => NetworkSTRLEN(ptr, ref storageApi),
                 //General key commands
-                (RespCommand.DBSIZE, 0) => NetworkDBSIZE(ptr, ref storageApi),
-                (RespCommand.KEYS, 0) => NetworkKEYS(count, ptr, ref storageApi),
-                (RespCommand.SCAN, 0) => NetworkSCAN(count, ptr, ref storageApi),
-                (RespCommand.TYPE, 0) => NetworkTYPE(ptr, ref storageApi),
+                RespCommand.DBSIZE => NetworkDBSIZE(ptr, ref storageApi),
+                RespCommand.KEYS => NetworkKEYS(ptr, ref storageApi),
+                RespCommand.SCAN => NetworkSCAN(count, ptr, ref storageApi),
+                RespCommand.TYPE => NetworkTYPE(count, ptr, ref storageApi),
                 // Pub/sub commands
-                (RespCommand.SUBSCRIBE, 0) => NetworkSUBSCRIBE(count, ptr, dend),
-                (RespCommand.PSUBSCRIBE, 0) => NetworkPSUBSCRIBE(count, ptr, dend),
-                (RespCommand.UNSUBSCRIBE, 0) => NetworkUNSUBSCRIBE(count, ptr, dend),
-                (RespCommand.PUNSUBSCRIBE, 0) => NetworkPUNSUBSCRIBE(count, ptr, dend),
+                RespCommand.SUBSCRIBE => NetworkSUBSCRIBE(count, ptr, dend),
+                RespCommand.PSUBSCRIBE => NetworkPSUBSCRIBE(count, ptr, dend),
+                RespCommand.UNSUBSCRIBE => NetworkUNSUBSCRIBE(count, ptr, dend),
+                RespCommand.PUNSUBSCRIBE => NetworkPUNSUBSCRIBE(count, ptr, dend),
                 // Custom Object Commands
-                (RespCommand.All, (byte)RespCommand.COSCAN) => ObjectScan(count, ptr, GarnetObjectType.All, ref storageApi, cmdlength: 23),
+                RespCommand.COSCAN => ObjectScan(count, ptr, GarnetObjectType.All, ref storageApi),
                 // Sorted Set commands
-                (RespCommand.SortedSet, (byte)SortedSetOperation.ZADD) => SortedSetAdd(count, ptr, ref storageApi),
-                (RespCommand.SortedSet, (byte)SortedSetOperation.ZREM) => SortedSetRemove(count, ptr, ref storageApi),
-                (RespCommand.SortedSet, (byte)SortedSetOperation.ZCARD) => SortedSetLength(count, ptr, ref storageApi),
-                (RespCommand.SortedSet, (byte)SortedSetOperation.ZPOPMAX) => SortedSetPop(count, ptr, SortedSetOperation.ZPOPMAX, ref storageApi),
-                (RespCommand.SortedSet, (byte)SortedSetOperation.ZSCORE) => SortedSetScore(count, ptr, ref storageApi),
-                (RespCommand.SortedSet, (byte)SortedSetOperation.ZCOUNT) => SortedSetCount(count, ptr, ref storageApi),
-                (RespCommand.SortedSet, (byte)SortedSetOperation.ZINCRBY) => SortedSetIncrement(count, ptr, ref storageApi),
-                (RespCommand.SortedSet, (byte)SortedSetOperation.ZRANK) => SortedSetRank(count, ptr, SortedSetOperation.ZRANK, ref storageApi),
-                (RespCommand.SortedSet, (byte)SortedSetOperation.ZRANGE) => SortedSetRange(count, ptr, SortedSetOperation.ZRANGE, ref storageApi),
-                (RespCommand.SortedSet, (byte)SortedSetOperation.ZRANGEBYSCORE) => SortedSetRange(count, ptr, SortedSetOperation.ZRANGEBYSCORE, ref storageApi),
-                (RespCommand.SortedSet, (byte)SortedSetOperation.ZREVRANK) => SortedSetRank(count, ptr, SortedSetOperation.ZREVRANK, ref storageApi),
-                (RespCommand.SortedSet, (byte)SortedSetOperation.ZREMRANGEBYLEX) => SortedSetLengthByValue(count, ptr, SortedSetOperation.ZREMRANGEBYLEX, ref storageApi),
-                (RespCommand.SortedSet, (byte)SortedSetOperation.ZREMRANGEBYRANK) => SortedSetRemoveRange(count, ptr, SortedSetOperation.ZREMRANGEBYRANK, ref storageApi),
-                (RespCommand.SortedSet, (byte)SortedSetOperation.ZREMRANGEBYSCORE) => SortedSetRemoveRange(count, ptr, SortedSetOperation.ZREMRANGEBYSCORE, ref storageApi),
-                (RespCommand.SortedSet, (byte)SortedSetOperation.ZLEXCOUNT) => SortedSetLengthByValue(count, ptr, SortedSetOperation.ZLEXCOUNT, ref storageApi),
-                (RespCommand.SortedSet, (byte)SortedSetOperation.ZPOPMIN) => SortedSetPop(count, ptr, SortedSetOperation.ZPOPMIN, ref storageApi),
-                (RespCommand.SortedSet, (byte)SortedSetOperation.ZRANDMEMBER) => SortedSetRandomMember(count, ptr, ref storageApi),
-                (RespCommand.SortedSet, (byte)SortedSetOperation.ZDIFF) => SortedSetDifference(count, ptr, ref storageApi),
-                (RespCommand.SortedSet, (byte)SortedSetOperation.ZREVRANGE) => SortedSetReverseRange(count, ptr, ref storageApi),
-                (RespCommand.SortedSet, (byte)SortedSetOperation.ZSCAN) => ObjectScan(count, ptr, GarnetObjectType.SortedSet, ref storageApi),
+                RespCommand.ZADD => SortedSetAdd(count, ptr, ref storageApi),
+                RespCommand.ZREM => SortedSetRemove(count, ptr, ref storageApi),
+                RespCommand.ZCARD => SortedSetLength(count, ptr, ref storageApi),
+                RespCommand.ZPOPMAX => SortedSetPop(cmd, count, ptr, ref storageApi),
+                RespCommand.ZSCORE => SortedSetScore(count, ptr, ref storageApi),
+                RespCommand.ZMSCORE => SortedSetScores(count, ptr, ref storageApi),
+                RespCommand.ZCOUNT => SortedSetCount(count, ptr, ref storageApi),
+                RespCommand.ZINCRBY => SortedSetIncrement(count, ptr, ref storageApi),
+                RespCommand.ZRANK => SortedSetRank(cmd, count, ptr, ref storageApi),
+                RespCommand.ZRANGE => SortedSetRange(cmd, count, ptr, ref storageApi),
+                RespCommand.ZRANGEBYSCORE => SortedSetRange(cmd, count, ptr, ref storageApi),
+                RespCommand.ZREVRANK => SortedSetRank(cmd, count, ptr, ref storageApi),
+                RespCommand.ZREMRANGEBYLEX => SortedSetLengthByValue(cmd, count, ptr, ref storageApi),
+                RespCommand.ZREMRANGEBYRANK => SortedSetRemoveRange(cmd, count, ptr, ref storageApi),
+                RespCommand.ZREMRANGEBYSCORE => SortedSetRemoveRange(cmd, count, ptr, ref storageApi),
+                RespCommand.ZLEXCOUNT => SortedSetLengthByValue(cmd, count, ptr, ref storageApi),
+                RespCommand.ZPOPMIN => SortedSetPop(cmd, count, ptr, ref storageApi),
+                RespCommand.ZRANDMEMBER => SortedSetRandomMember(count, ptr, ref storageApi),
+                RespCommand.ZDIFF => SortedSetDifference(count, ptr, ref storageApi),
+                RespCommand.ZREVRANGE => SortedSetRange(cmd, count, ptr, ref storageApi),
+                RespCommand.ZSCAN => ObjectScan(count, ptr, GarnetObjectType.SortedSet, ref storageApi),
                 //SortedSet for Geo Commands
-                (RespCommand.SortedSet, (byte)SortedSetOperation.GEOADD) => GeoAdd(count, ptr, ref storageApi),
-                (RespCommand.SortedSet, (byte)SortedSetOperation.GEOHASH) => GeoCommands(count, ptr, SortedSetOperation.GEOHASH, ref storageApi),
-                (RespCommand.SortedSet, (byte)SortedSetOperation.GEODIST) => GeoCommands(count, ptr, SortedSetOperation.GEODIST, ref storageApi),
-                (RespCommand.SortedSet, (byte)SortedSetOperation.GEOPOS) => GeoCommands(count, ptr, SortedSetOperation.GEOPOS, ref storageApi),
-                (RespCommand.SortedSet, (byte)SortedSetOperation.GEOSEARCH) => GeoCommands(count, ptr, SortedSetOperation.GEOSEARCH, ref storageApi),
+                RespCommand.GEOADD => GeoAdd(count, ptr, ref storageApi),
+                RespCommand.GEOHASH => GeoCommands(cmd, count, ptr, ref storageApi),
+                RespCommand.GEODIST => GeoCommands(cmd, count, ptr, ref storageApi),
+                RespCommand.GEOPOS => GeoCommands(cmd, count, ptr, ref storageApi),
+                RespCommand.GEOSEARCH => GeoCommands(cmd, count, ptr, ref storageApi),
                 //HLL Commands
-                (RespCommand.PFADD, 0) => HyperLogLogAdd(count, ptr, ref storageApi),
-                (RespCommand.PFMERGE, 0) => HyperLogLogMerge(count, ptr, ref storageApi),
-                (RespCommand.PFCOUNT, 0) => HyperLogLogLength(count, ptr, ref storageApi),
+                RespCommand.PFADD => HyperLogLogAdd(count, ptr, ref storageApi),
+                RespCommand.PFMERGE => HyperLogLogMerge(count, ptr, ref storageApi),
+                RespCommand.PFCOUNT => HyperLogLogLength(count, ptr, ref storageApi),
                 //Bitmap Commands
-                (RespCommand.BITOP, (byte)BitmapOperation.AND or (byte)BitmapOperation.OR or (byte)BitmapOperation.XOR or (byte)BitmapOperation.NOT) => StringBitOperation(count, ptr, (BitmapOperation)cmd.Item2, ref storageApi),
-                (RespCommand.BITFIELD, 0) => StringBitField(count, ptr, ref storageApi),
-                (RespCommand.BITFIELD_RO, 0) => StringBitFieldReadOnly(count, ptr, ref storageApi),
+                RespCommand.BITOP_AND => NetworkStringBitOperation(count, ptr, BitmapOperation.AND, ref storageApi),
+                RespCommand.BITOP_OR => NetworkStringBitOperation(count, ptr, BitmapOperation.OR, ref storageApi),
+                RespCommand.BITOP_XOR => NetworkStringBitOperation(count, ptr, BitmapOperation.XOR, ref storageApi),
+                RespCommand.BITOP_NOT => NetworkStringBitOperation(count, ptr, BitmapOperation.NOT, ref storageApi),
+                RespCommand.BITFIELD => StringBitField(count, ptr, ref storageApi),
+                RespCommand.BITFIELD_RO => StringBitFieldReadOnly(count, ptr, ref storageApi),
                 // List Commands
-                (RespCommand.List, (byte)ListOperation.LPUSH) => ListPush(count, ptr, ListOperation.LPUSH, ref storageApi),
-                (RespCommand.List, (byte)ListOperation.LPUSHX) => ListPush(count, ptr, ListOperation.LPUSHX, ref storageApi),
-                (RespCommand.List, (byte)ListOperation.LPOP) => ListPop(count, ptr, ListOperation.LPOP, ref storageApi),
-                (RespCommand.List, (byte)ListOperation.RPUSH) => ListPush(count, ptr, ListOperation.RPUSH, ref storageApi),
-                (RespCommand.List, (byte)ListOperation.RPUSHX) => ListPush(count, ptr, ListOperation.RPUSHX, ref storageApi),
-                (RespCommand.List, (byte)ListOperation.RPOP) => ListPop(count, ptr, ListOperation.RPOP, ref storageApi),
-                (RespCommand.List, (byte)ListOperation.LLEN) => ListLength(count, ptr, ref storageApi),
-                (RespCommand.List, (byte)ListOperation.LTRIM) => ListTrim(count, ptr, ref storageApi),
-                (RespCommand.List, (byte)ListOperation.LRANGE) => ListRange(count, ptr, ref storageApi),
-                (RespCommand.List, (byte)ListOperation.LINDEX) => ListIndex(count, ptr, ref storageApi),
-                (RespCommand.List, (byte)ListOperation.LINSERT) => ListInsert(count, ptr, ref storageApi),
-                (RespCommand.List, (byte)ListOperation.LREM) => ListRemove(count, ptr, ref storageApi),
-                (RespCommand.List, (byte)ListOperation.RPOPLPUSH) => ListRightPopLeftPush(count, ptr, ref storageApi),
-                (RespCommand.List, (byte)ListOperation.LMOVE) => ListMove(count, ptr, ref storageApi),
+                RespCommand.LPUSH => ListPush(cmd, count, ptr, ref storageApi),
+                RespCommand.LPUSHX => ListPush(cmd, count, ptr, ref storageApi),
+                RespCommand.LPOP => ListPop(cmd, count, ptr, ref storageApi),
+                RespCommand.RPUSH => ListPush(cmd, count, ptr, ref storageApi),
+                RespCommand.RPUSHX => ListPush(cmd, count, ptr, ref storageApi),
+                RespCommand.RPOP => ListPop(cmd, count, ptr, ref storageApi),
+                RespCommand.LLEN => ListLength(count, ptr, ref storageApi),
+                RespCommand.LTRIM => ListTrim(count, ptr, ref storageApi),
+                RespCommand.LRANGE => ListRange(count, ptr, ref storageApi),
+                RespCommand.LINDEX => ListIndex(count, ptr, ref storageApi),
+                RespCommand.LINSERT => ListInsert(count, ptr, ref storageApi),
+                RespCommand.LREM => ListRemove(count, ptr, ref storageApi),
+                RespCommand.RPOPLPUSH => ListRightPopLeftPush(count, ptr, ref storageApi),
+                RespCommand.LMOVE => ListMove(count, ptr, ref storageApi),
+                RespCommand.LSET => ListSet(count, ptr, ref storageApi),
+                RespCommand.BLPOP => ListBlockingPop(cmd, count, ptr, ref storageApi),
+                RespCommand.BRPOP => ListBlockingPop(cmd, count, ptr, ref storageApi),
+                RespCommand.BLMOVE => ListBlockingMove(cmd, count, ptr, ref storageApi),
                 // Hash Commands
-                (RespCommand.Hash, (byte)HashOperation.HSET) => HashSet(count, ptr, HashOperation.HSET, ref storageApi),
-                (RespCommand.Hash, (byte)HashOperation.HMSET) => HashSet(count, ptr, HashOperation.HMSET, ref storageApi),
-                (RespCommand.Hash, (byte)HashOperation.HGET) => HashGet(count, ptr, HashOperation.HGET, ref storageApi),
-                (RespCommand.Hash, (byte)HashOperation.HMGET) => HashGet(count, ptr, HashOperation.HMGET, ref storageApi),
-                (RespCommand.Hash, (byte)HashOperation.HGETALL) => HashGet(count, ptr, HashOperation.HGETALL, ref storageApi),
-                (RespCommand.Hash, (byte)HashOperation.HDEL) => HashDelete(count, ptr, ref storageApi),
-                (RespCommand.Hash, (byte)HashOperation.HLEN) => HashLength(count, ptr, ref storageApi),
-                (RespCommand.Hash, (byte)HashOperation.HEXISTS) => HashExists(count, ptr, ref storageApi),
-                (RespCommand.Hash, (byte)HashOperation.HKEYS) => HashKeys(count, ptr, HashOperation.HKEYS, ref storageApi),
-                (RespCommand.Hash, (byte)HashOperation.HVALS) => HashKeys(count, ptr, HashOperation.HVALS, ref storageApi),
-                (RespCommand.Hash, (byte)HashOperation.HINCRBY) => HashIncrement(count, ptr, HashOperation.HINCRBY, ref storageApi),
-                (RespCommand.Hash, (byte)HashOperation.HINCRBYFLOAT) => HashIncrement(count, ptr, HashOperation.HINCRBYFLOAT, ref storageApi),
-                (RespCommand.Hash, (byte)HashOperation.HSETNX) => HashSet(count, ptr, HashOperation.HSETNX, ref storageApi),
-                (RespCommand.Hash, (byte)HashOperation.HRANDFIELD) => HashGet(count, ptr, HashOperation.HRANDFIELD, ref storageApi),
-                (RespCommand.Hash, (byte)HashOperation.HSCAN) => ObjectScan(count, ptr, GarnetObjectType.Hash, ref storageApi),
-
+                RespCommand.HSET => HashSet(cmd, count, ptr, ref storageApi),
+                RespCommand.HMSET => HashSet(cmd, count, ptr, ref storageApi),
+                RespCommand.HGET => HashGet(cmd, count, ptr, ref storageApi),
+                RespCommand.HMGET => HashGetMultiple(cmd, count, ptr, ref storageApi),
+                RespCommand.HGETALL => HashGetAll(cmd, count, ptr, ref storageApi),
+                RespCommand.HDEL => HashDelete(count, ptr, ref storageApi),
+                RespCommand.HLEN => HashLength(count, ptr, ref storageApi),
+                RespCommand.HSTRLEN => HashStrLength(count, ptr, ref storageApi),
+                RespCommand.HEXISTS => HashExists(count, ptr, ref storageApi),
+                RespCommand.HKEYS => HashKeys(cmd, count, ptr, ref storageApi),
+                RespCommand.HVALS => HashKeys(cmd, count, ptr, ref storageApi),
+                RespCommand.HINCRBY => HashIncrement(cmd, count, ptr, ref storageApi),
+                RespCommand.HINCRBYFLOAT => HashIncrement(cmd, count, ptr, ref storageApi),
+                RespCommand.HSETNX => HashSet(cmd, count, ptr, ref storageApi),
+                RespCommand.HRANDFIELD => HashRandomField(cmd, count, ptr, ref storageApi),
+                RespCommand.HSCAN => ObjectScan(count, ptr, GarnetObjectType.Hash, ref storageApi),
                 // Set Commands
-                (RespCommand.Set, (byte)SetOperation.SADD) => SetAdd(count, ptr, ref storageApi),
-                (RespCommand.Set, (byte)SetOperation.SMEMBERS) => SetMembers(count, ptr, ref storageApi),
-                (RespCommand.Set, (byte)SetOperation.SREM) => SetRemove(count, ptr, ref storageApi),
-                (RespCommand.Set, (byte)SetOperation.SCARD) => SetLength(count, ptr, ref storageApi),
-                (RespCommand.Set, (byte)SetOperation.SPOP) => SetPop(count, ptr, ref storageApi),
-                (RespCommand.Set, (byte)SetOperation.SSCAN) => ObjectScan(count, ptr, GarnetObjectType.Set, ref storageApi),
-                _ => ProcessOtherCommands(count, ref storageApi),
+                RespCommand.SADD => SetAdd(count, ptr, ref storageApi),
+                RespCommand.SMEMBERS => SetMembers(count, ptr, ref storageApi),
+                RespCommand.SISMEMBER => SetIsMember(count, ptr, ref storageApi),
+                RespCommand.SREM => SetRemove(count, ptr, ref storageApi),
+                RespCommand.SCARD => SetLength(count, ptr, ref storageApi),
+                RespCommand.SPOP => SetPop(count, ptr, ref storageApi),
+                RespCommand.SRANDMEMBER => SetRandomMember(count, ptr, ref storageApi),
+                RespCommand.SSCAN => ObjectScan(count, ptr, GarnetObjectType.Set, ref storageApi),
+                RespCommand.SMOVE => SetMove(count, ptr, ref storageApi),
+                RespCommand.SINTER => SetIntersect(count, ptr, ref storageApi),
+                RespCommand.SINTERSTORE => SetIntersectStore(count, ptr, ref storageApi),
+                RespCommand.SUNION => SetUnion(count, ptr, ref storageApi),
+                RespCommand.SUNIONSTORE => SetUnionStore(count, ptr, ref storageApi),
+                RespCommand.SDIFF => SetDiff(count, ptr, ref storageApi),
+                RespCommand.SDIFFSTORE => SetDiffStore(count, ptr, ref storageApi),
+                _ => ProcessOtherCommands(cmd, count, ref storageApi)
             };
             return success;
         }
 
-        private bool ProcessOtherCommands<TGarnetApi>(int count, ref TGarnetApi storageApi)
+        private bool ProcessOtherCommands<TGarnetApi>(RespCommand command, int count, ref TGarnetApi storageApi)
             where TGarnetApi : IGarnetApi
         {
-            ReadOnlySpan<byte> bufSpan = new(recvBufferPtr, bytesRead);
-
-            var command = GetCommand(bufSpan, out bool success);
-            if (!success) return false;
-
-            if (!_authenticator.IsAuthenticated) return ProcessAdminCommands(command, bufSpan, count, ref storageApi);
-            if (command.SequenceEqual(CmdStrings.CLIENT))
+            if (command == RespCommand.CLIENT)
             {
-                for (int i = 0; i < count - 1; i++)
-                {
-                    GetCommand(bufSpan, out bool success1);
-                    if (!success1) return false;
-                }
-                while (!RespWriteUtils.WriteResponse(CmdStrings.RESP_OK, ref dcurr, dend))
+                while (!RespWriteUtils.WriteDirect(CmdStrings.RESP_OK, ref dcurr, dend))
                     SendAndReset();
             }
-            else if (command.SequenceEqual(CmdStrings.SUBSCRIBE))
+            else if (command == RespCommand.SUBSCRIBE)
             {
-                for (int i = 0; i < count - 1; i++)
-                {
-                    GetCommand(bufSpan, out bool success1);
-                    if (!success1) return false;
-                }
                 while (!RespWriteUtils.WriteInteger(1, ref dcurr, dend))
                     SendAndReset();
             }
-            else if (command.SequenceEqual(CmdStrings.RUNTXP))
+            else if (command == RespCommand.RUNTXP)
             {
                 byte* ptr = recvBufferPtr + readHead;
-                return NetworkRUNTXP(ptr, count);
+                return NetworkRUNTXP(count, ptr);
             }
-            else if (storeWrapper.customCommandManager.Match(command, out CustomTransaction txn))
+            else if (command == RespCommand.CustomTxn)
             {
-                byte* ptr = recvBufferPtr + readHead;
-                for (int i = 0; i < count - 1; i++)
+                if (currentCustomTransaction.NumParams < int.MaxValue && count != currentCustomTransaction.NumParams)
                 {
-                    GetCommand(bufSpan, out bool success1);
-                    if (!success1) return false;
-                }
-
-                if (count - 1 != txn.NumParams)
-                {
-                    while (!RespWriteUtils.WriteDirect(Encoding.ASCII.GetBytes($"-ERR Invalid number of parameters to stored proc {txn.nameStr}, expected {txn.NumParams}, actual {count - 1}\r\n"), ref dcurr, dend))
+                    while (!RespWriteUtils.WriteError($"ERR Invalid number of parameters to stored proc {currentCustomTransaction.nameStr}, expected {currentCustomTransaction.NumParams}, actual {count}", ref dcurr, dend))
                         SendAndReset();
+
+                    currentCustomTransaction = null;
+
                     return true;
                 }
                 else
                 {
                     // Perform the operation
-                    TryTransactionProc(txn.id, ptr, recvBufferPtr + readHead, customCommandManagerSession.GetCustomTransactionProcedure(txn.id, txnManager, scratchBufferManager).Item1);
-                }
-            }
-            else if (storeWrapper.customCommandManager.Match(command, out CustomCommand cmd))
-            {
-                byte* ptr = recvBufferPtr + readHead;
-                for (int i = 0; i < count - 1; i++)
-                {
-                    GetCommand(bufSpan, out bool success1);
-                    if (!success1) return false;
+                    TryTransactionProc(currentCustomTransaction.id, recvBufferPtr + readHead, recvBufferPtr + endReadHead, customCommandManagerSession.GetCustomTransactionProcedure(currentCustomTransaction.id, txnManager, scratchBufferManager).Item1);
                 }
 
-                if (count - 1 != cmd.NumKeys + cmd.NumParams)
+                currentCustomTransaction = null;
+            }
+            else if (command == RespCommand.CustomCmd)
+            {
+                if (currentCustomCommand.NumParams < int.MaxValue && count != currentCustomCommand.NumKeys + currentCustomCommand.NumParams)
                 {
-                    while (!RespWriteUtils.WriteDirect(Encoding.ASCII.GetBytes($"-ERR Invalid number of parameters, expected {cmd.NumKeys + cmd.NumParams}, actual {count - 1}\r\n"), ref dcurr, dend))
+                    while (!RespWriteUtils.WriteError($"ERR Invalid number of parameters, expected {currentCustomCommand.NumKeys + currentCustomCommand.NumParams}, actual {count}", ref dcurr, dend))
                         SendAndReset();
+
+                    currentCustomCommand = null;
+
                     return true;
                 }
                 else
                 {
                     // Perform the operation
-                    TryCustomCommand(ptr, recvBufferPtr + readHead, cmd.GetRespCommand(), cmd.expirationTicks, cmd.type, ref storageApi);
-                }
-            }
-            else if (storeWrapper.customCommandManager.Match(command, out CustomObjectCommand ocmd))
-            {
-                byte* ptr = recvBufferPtr + readHead;
-                for (int i = 0; i < count - 1; i++)
-                {
-                    GetCommand(bufSpan, out bool success1);
-                    if (!success1) return false;
+                    TryCustomCommand(recvBufferPtr + readHead, recvBufferPtr + endReadHead, currentCustomCommand.GetRespCommand(), currentCustomCommand.expirationTicks, currentCustomCommand.type, ref storageApi);
                 }
 
-                if (count - 1 != ocmd.NumKeys + ocmd.NumParams)
+                currentCustomCommand = null;
+            }
+            else if (command == RespCommand.CustomObjCmd)
+            {
+                if (count != currentCustomObjectCommand.NumKeys + currentCustomObjectCommand.NumParams)
                 {
-                    while (!RespWriteUtils.WriteDirect(Encoding.ASCII.GetBytes($"-ERR Invalid number of parameters, expected {ocmd.NumKeys + ocmd.NumParams}, actual {count - 1}\r\n"), ref dcurr, dend))
+                    while (!RespWriteUtils.WriteError($"ERR Invalid number of parameters, expected {currentCustomObjectCommand.NumKeys + currentCustomObjectCommand.NumParams}, actual {count}", ref dcurr, dend))
                         SendAndReset();
+
+                    currentCustomObjectCommand = null;
+
                     return true;
                 }
                 else
                 {
                     // Perform the operation
-                    TryCustomObjectCommand(ptr, recvBufferPtr + readHead, ocmd.GetRespCommand(), ocmd.subid, ocmd.type, ref storageApi);
+                    TryCustomObjectCommand(recvBufferPtr + readHead, recvBufferPtr + endReadHead, currentCustomObjectCommand.GetRespCommand(), currentCustomObjectCommand.subid, currentCustomObjectCommand.type, ref storageApi);
                 }
+
+                currentCustomObjectCommand = null;
             }
+
             else
             {
-                return ProcessAdminCommands(command, bufSpan, count, ref storageApi);
+                return ProcessAdminCommands(command, count, ref storageApi);
             }
             return true;
         }
 
-        ReadOnlySpan<byte> GetCommand(ReadOnlySpan<byte> bufSpan, out bool success)
+        Span<byte> GetCommand(out bool success)
         {
-            if (bytesRead - readHead < 6)
+            var ptr = recvBufferPtr + readHead;
+            var end = recvBufferPtr + bytesRead;
+
+            // Try the command length
+            if (!RespReadUtils.ReadUnsignedLengthHeader(out int length, ref ptr, end))
             {
                 success = false;
                 return default;
             }
 
-            Debug.Assert(*(recvBufferPtr + readHead) == '$');
-            int psize = *(recvBufferPtr + readHead + 1) - '0';
-            readHead += 2;
-            while (*(recvBufferPtr + readHead) != '\r')
-            {
-                psize = psize * 10 + *(recvBufferPtr + readHead) - '0';
-                if (bytesRead - readHead < 1)
-                {
-                    success = false;
-                    return default;
-                }
-                readHead++;
-            }
-            if (bytesRead - readHead < 2 + psize + 2)
+            readHead = (int)(ptr - recvBufferPtr);
+
+            // Try to read the command value
+            ptr += length;
+            if (ptr + 2 > end)
             {
                 success = false;
                 return default;
             }
-            Debug.Assert(*(recvBufferPtr + readHead + 1) == '\n');
 
-            var result = bufSpan.Slice(readHead + 2, psize);
-            Debug.Assert(*(recvBufferPtr + readHead + 2 + psize) == '\r');
-            Debug.Assert(*(recvBufferPtr + readHead + 2 + psize + 1) == '\n');
+            if (*(ushort*)ptr != MemoryMarshal.Read<ushort>("\r\n"u8))
+            {
+                RespParsingException.ThrowUnexpectedToken(*ptr);
+            }
 
-            readHead += 2 + psize + 2;
+            var result = new Span<byte>(recvBufferPtr + readHead, length);
+            readHead += length + 2;
             success = true;
+
             return result;
         }
 
@@ -716,6 +796,13 @@ namespace Garnet.server
                 dcurr = networkSender.GetResponseObjectHead();
                 dend = networkSender.GetResponseObjectTail();
             }
+            else
+            {
+                // Reaching here means that we retried SendAndReset without the RespWriteUtils.Write*
+                // method making any progress. This should only happen when the message being written is
+                // too large to fit in the response buffer.
+                GarnetException.Throw("Failed to write to response buffer", LogLevel.Critical);
+            }
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -761,10 +848,40 @@ namespace Garnet.server
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void WriteDirectLarge(ReadOnlySpan<byte> src)
+        {
+            // Repeat while we have bytes left to write
+            while (src.Length > 0)
+            {
+                // Compute space left on output buffer
+                int destSpace = (int)(dend - dcurr);
+
+                // Fast path if there is enough space 
+                if (src.Length <= destSpace)
+                {
+                    src.CopyTo(new Span<byte>(dcurr, src.Length));
+                    dcurr += src.Length;
+                    break;
+                }
+
+                // Adjust number of bytes to copy, to space left on output buffer, then copy
+                src.Slice(0, destSpace).CopyTo(new Span<byte>(dcurr, destSpace));
+                src = src.Slice(destSpace);
+
+                // Send and reset output buffer
+                Send(networkSender.GetResponseObjectHead());
+                networkSender.GetResponseObject();
+                dcurr = networkSender.GetResponseObjectHead();
+                dend = networkSender.GetResponseObjectTail();
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void Send(byte* d)
         {
             // #if DEBUG
             // logger?.LogTrace("SEND: [{send}]", Encoding.UTF8.GetString(new Span<byte>(d, (int)(dcurr - d))).Replace("\n", "|").Replace("\r", ""));
+            // Debug.WriteLine($"SEND: [{Encoding.UTF8.GetString(new Span<byte>(d, (int)(dcurr - d))).Replace("\n", "|").Replace("\r", "")}]");
             // #endif
 
             if ((int)(dcurr - d) > 0)
@@ -843,25 +960,5 @@ namespace Garnet.server
 
             return header;
         }
-
-        bool NetworkSingleKeySlotVerify(byte[] key, bool readOnly)
-            => clusterSession != null && clusterSession.NetworkSingleKeySlotVerify(key, readOnly, SessionAsking, ref dcurr, ref dend);
-
-        bool NetworkSingleKeySlotVerify(byte* keyPtr, int ksize, bool readOnly)
-            => clusterSession != null && clusterSession.NetworkSingleKeySlotVerify(new ArgSlice(keyPtr, ksize), readOnly, SessionAsking, ref dcurr, ref dend);
-
-        bool NetworkArraySlotVerify(int keyCount, byte* ptr, bool interleavedKeys, bool readOnly, out bool retVal)
-        {
-            retVal = false;
-            if (clusterSession != null && clusterSession.NetworkArraySlotVerify(keyCount, ref ptr, recvBufferPtr + bytesRead, interleavedKeys, readOnly, SessionAsking, ref dcurr, ref dend, out retVal))
-            {
-                readHead = (int)(ptr - recvBufferPtr);
-                return true;
-            }
-            return false;
-        }
-
-        bool NetworkKeyArraySlotVerify(ref ArgSlice[] keys, bool readOnly, int count = -1)
-            => clusterSession != null && clusterSession.NetworkKeyArraySlotVerify(ref keys, readOnly, SessionAsking, ref dcurr, ref dend, count);
     }
 }

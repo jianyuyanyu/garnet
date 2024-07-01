@@ -31,12 +31,15 @@ namespace Garnet.server
         LREM,
         RPOPLPUSH,
         LMOVE,
+        LSET,
+        BRPOP,
+        BLPOP,
     }
 
     /// <summary>
     /// Direction for the List operations
     /// </summary>
-    public enum OperationDirection
+    public enum OperationDirection : byte
     {
         /// <summary>
         /// Left or head
@@ -47,8 +50,8 @@ namespace Garnet.server
         /// Right or tail
         /// </summary>
         Right,
+        Unknown,
     }
-
 
     /// <summary>
     /// List
@@ -124,21 +127,23 @@ namespace Garnet.server
         public override GarnetObjectBase Clone() => new ListObject(list, Expiration, Size);
 
         /// <inheritdoc />
-        public override unsafe bool Operate(ref SpanByte input, ref SpanByteAndMemory output, out long sizeChange)
+        public override unsafe bool Operate(ref SpanByte input, ref SpanByteAndMemory output, out long sizeChange, out bool removeKey)
         {
             fixed (byte* _input = input.AsSpan())
             fixed (byte* _output = output.SpanByte.AsSpan())
             {
+                removeKey = false;
+
                 var header = (RespInputHeader*)_input;
                 if (header->type != GarnetObjectType.List)
                 {
-                    //Indicates an incorrect type of key
+                    // Indicates an incorrect type of key
                     output.Length = 0;
                     sizeChange = 0;
                     return true;
                 }
 
-                var previouseSize = this.Size;
+                var previousSize = this.Size;
                 switch (header->ListOp)
                 {
                     case ListOperation.LPUSH:
@@ -173,13 +178,18 @@ namespace Garnet.server
                     case ListOperation.LREM:
                         ListRemove(_input, input.Length, _output);
                         break;
+                    case ListOperation.LSET:
+                        ListSet(_input, input.Length, ref output);
+                        break;
 
                     default:
                         throw new GarnetException($"Unsupported operation {(ListOperation)_input[0]} in ListObject.Operate");
                 }
 
-                sizeChange = this.Size - previouseSize;
+                sizeChange = this.Size - previousSize;
             }
+
+            removeKey = list.Count == 0;
             return true;
         }
 

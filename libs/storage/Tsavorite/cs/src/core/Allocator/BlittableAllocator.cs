@@ -41,7 +41,8 @@ namespace Tsavorite.core
             base.Reset();
             for (int index = 0; index < BufferSize; index++)
             {
-                ReturnPage(index);
+                if (IsAllocated(index))
+                    FreePage(index);
             }
             Initialize();
         }
@@ -92,7 +93,7 @@ namespace Tsavorite.core
             return (RecordSize, RecordSize);
         }
 
-        public override (int actualSize, int allocatedSize, int keySize) GetRMWCopyDestinationRecordSize<Input, TsavoriteSession>(ref Key key, ref Input input, ref Value value, ref RecordInfo recordInfo, TsavoriteSession tsavoriteSession)
+        public override (int actualSize, int allocatedSize, int keySize) GetRMWCopyDestinationRecordSize<Input, TVariableLengthInput>(ref Key key, ref Input input, ref Value value, ref RecordInfo recordInfo, TVariableLengthInput varlenInput)
         {
             return (RecordSize, RecordSize, KeySize);
         }
@@ -101,7 +102,7 @@ namespace Tsavorite.core
 
         public override int GetFixedRecordSize() => RecordSize;
 
-        public override (int actualSize, int allocatedSize, int keySize) GetRMWInitialRecordSize<Input, TsavoriteSession>(ref Key key, ref Input input, TsavoriteSession tsavoriteSession)
+        public override (int actualSize, int allocatedSize, int keySize) GetRMWInitialRecordSize<Input, TSessionFunctionsWrapper>(ref Key key, ref Input input, TSessionFunctionsWrapper sessionFunctions)
         {
             return (RecordSize, RecordSize, KeySize);
         }
@@ -138,7 +139,7 @@ namespace Tsavorite.core
         /// <param name="index"></param>
         internal override void AllocatePage(int index)
         {
-            Interlocked.Increment(ref AllocatedPageCount);
+            IncrementAllocatedPageCount();
 
             if (overflowPagePool.TryGet(out var item))
             {
@@ -151,7 +152,6 @@ namespace Tsavorite.core
 
             byte[] tmp = GC.AllocateArray<byte>(adjustedSize, true);
             long p = (long)Unsafe.AsPointer(ref tmp[0]);
-            Array.Clear(tmp, 0, adjustedSize);
             pointers[index] = (p + (sectorSize - 1)) & ~((long)sectorSize - 1);
             values[index] = tmp;
         }
@@ -319,15 +319,15 @@ namespace Tsavorite.core
         /// <summary>
         /// Iterator interface for pull-scanning Tsavorite log
         /// </summary>
-        public override ITsavoriteScanIterator<Key, Value> Scan(TsavoriteKV<Key, Value> store, long beginAddress, long endAddress, ScanBufferingMode scanBufferingMode)
-            => new BlittableScanIterator<Key, Value>(store, this, beginAddress, endAddress, scanBufferingMode, epoch, logger: logger);
+        public override ITsavoriteScanIterator<Key, Value> Scan(TsavoriteKV<Key, Value> store, long beginAddress, long endAddress, ScanBufferingMode scanBufferingMode, bool includeSealedRecords)
+            => new BlittableScanIterator<Key, Value>(store, this, beginAddress, endAddress, scanBufferingMode, includeSealedRecords, epoch, logger: logger);
 
         /// <summary>
         /// Implementation for push-scanning Tsavorite log, called from LogAccessor
         /// </summary>
         internal override bool Scan<TScanFunctions>(TsavoriteKV<Key, Value> store, long beginAddress, long endAddress, ref TScanFunctions scanFunctions, ScanBufferingMode scanBufferingMode)
         {
-            using BlittableScanIterator<Key, Value> iter = new(store, this, beginAddress, endAddress, scanBufferingMode, epoch, logger: logger);
+            using BlittableScanIterator<Key, Value> iter = new(store, this, beginAddress, endAddress, scanBufferingMode, false, epoch, logger: logger);
             return PushScanImpl(beginAddress, endAddress, ref scanFunctions, iter);
         }
 
@@ -336,7 +336,7 @@ namespace Tsavorite.core
         /// </summary>
         internal override bool ScanCursor<TScanFunctions>(TsavoriteKV<Key, Value> store, ScanCursorState<Key, Value> scanCursorState, ref long cursor, long count, TScanFunctions scanFunctions, long endAddress, bool validateCursor)
         {
-            using BlittableScanIterator<Key, Value> iter = new(store, this, cursor, endAddress, ScanBufferingMode.SinglePageBuffering, epoch, logger: logger);
+            using BlittableScanIterator<Key, Value> iter = new(store, this, cursor, endAddress, ScanBufferingMode.SinglePageBuffering, false, epoch, logger: logger);
             return ScanLookup<long, long, TScanFunctions, BlittableScanIterator<Key, Value>>(store, scanCursorState, ref cursor, count, scanFunctions, iter, validateCursor);
         }
 
@@ -352,7 +352,7 @@ namespace Tsavorite.core
         /// <inheritdoc />
         internal override void MemoryPageScan(long beginAddress, long endAddress, IObserver<ITsavoriteScanIterator<Key, Value>> observer)
         {
-            using var iter = new BlittableScanIterator<Key, Value>(store: null, this, beginAddress, endAddress, ScanBufferingMode.NoBuffering, epoch, true, logger: logger);
+            using var iter = new BlittableScanIterator<Key, Value>(store: null, this, beginAddress, endAddress, ScanBufferingMode.NoBuffering, false, epoch, true, logger: logger);
             observer?.OnNext(iter);
         }
 
@@ -385,7 +385,6 @@ namespace Tsavorite.core
                                         CancellationTokenSource cts = null)
         {
             var usedDevice = device;
-            IDevice usedObjlogDevice = objectLogDevice;
 
             if (device == null)
             {

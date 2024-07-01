@@ -9,6 +9,7 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Garnet.server.Auth.Settings;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using StackExchange.Redis;
@@ -25,6 +26,9 @@ namespace Garnet.test.cluster
         public ILoggerFactory loggerFactory;
         public ILogger logger;
 
+        public int defaultShards = 3;
+        public static int Port = 7000;
+
         public Random r = new();
         public ManualResetEventSlim waiter;
 
@@ -35,7 +39,7 @@ namespace Garnet.test.cluster
         public void Setup(HashSet<string> monitorTests)
         {
             TestFolder = TestUtils.UnitTestWorkingDir() + "\\";
-            LogLevel logLevel = monitorTests.Contains(TestContext.CurrentContext.Test.MethodName) ? LogLevel.Warning : LogLevel.Error;
+            var logLevel = monitorTests.Contains(TestContext.CurrentContext.Test.MethodName) ? LogLevel.Trace : LogLevel.Error;
             loggerFactory = TestUtils.CreateLoggerFactoryInstance(logTextWriter, logLevel, scope: TestContext.CurrentContext.Test.Name);
             logger = loggerFactory.CreateLogger(TestContext.CurrentContext.Test.Name);
             logger.LogDebug("0. Setup >>>>>>>>>>>>");
@@ -47,9 +51,9 @@ namespace Garnet.test.cluster
         public void TearDown()
         {
             logger.LogDebug("0. Dispose <<<<<<<<<<<");
-            waiter.Dispose();
+            waiter?.Dispose();
             clusterTestUtils?.Dispose();
-            loggerFactory.Dispose();
+            loggerFactory?.Dispose();
             DisposeCluster();
             TestUtils.DeleteDirectory(TestFolder, true);
         }
@@ -94,17 +98,19 @@ namespace Garnet.test.cluster
             int CommitFrequencyMs = 0,
             bool DisableStorageTier = false,
             bool EnableIncrementalSnapshots = false,
-            bool FastCommit = false,
+            bool FastCommit = true,
             int timeout = -1,
             bool useTLS = false,
             bool useAcl = false,
             X509CertificateCollection certificates = null,
-            ServerCredentials clusterCreds = new ServerCredentials())
+            ServerCredential clusterCreds = new ServerCredential(),
+            AadAuthenticationSettings authenticationSettings = null,
+            bool disablePubSub = true)
         {
             endpoints = TestUtils.GetEndPoints(shards, 7000);
             nodes = TestUtils.CreateGarnetCluster(
                 TestFolder,
-                disablePubSub: true,
+                disablePubSub: disablePubSub,
                 disableObjects: disableObjects,
                 endpoints: endpoints,
                 enableAOF: enableAOF,
@@ -128,7 +134,8 @@ namespace Garnet.test.cluster
                 aclFile: credManager.aclFilePath,
                 authUsername: clusterCreds.user,
                 authPassword: clusterCreds.password,
-                certificates: certificates);
+                certificates: certificates,
+                authenticationSettings: authenticationSettings);
 
             foreach (var node in nodes)
                 node.Start();
@@ -176,13 +183,13 @@ namespace Garnet.test.cluster
             int CommitFrequencyMs = 0,
             bool DisableStorageTier = false,
             bool EnableIncrementalSnapshots = false,
-            bool FastCommit = false,
+            bool FastCommit = true,
             int timeout = -1,
             int gossipDelay = 5,
             bool useTLS = false,
             bool useAcl = false,
             X509CertificateCollection certificates = null,
-            ServerCredentials clusterCreds = new ServerCredentials())
+            ServerCredential clusterCreds = new ServerCredential())
         {
 
             var opts = TestUtils.GetGarnetServerOptions(
@@ -225,7 +232,7 @@ namespace Garnet.test.cluster
         {
             if (nodes != null)
             {
-                for (int i = 0; i < nodes.Length; i++)
+                for (var i = 0; i < nodes.Length; i++)
                 {
                     if (nodes[i] != null)
                     {
@@ -247,9 +254,9 @@ namespace Garnet.test.cluster
         public void CreateConnection(
             bool useTLS = false,
             X509CertificateCollection certificates = null,
-            ServerCredentials clientCreds = new ServerCredentials())
+            ServerCredential clientCreds = new ServerCredential())
         {
-            if (clusterTestUtils != null) clusterTestUtils.Dispose();
+            clusterTestUtils?.Dispose();
             clusterTestUtils = new ClusterTestUtils(
                 endpoints,
                 textWriter: logTextWriter,
@@ -265,7 +272,7 @@ namespace Garnet.test.cluster
         /// Generate credential file through credManager
         /// </summary>
         /// <param name="customCreds"></param>
-        public void GenerateCredentials(ServerCredentials[] customCreds = null)
+        public void GenerateCredentials(ServerCredential[] customCreds = null)
             => credManager.GenerateCredentials(TestFolder, customCreds);
 
         public int keyOffset = 0;
@@ -285,7 +292,7 @@ namespace Garnet.test.cluster
             int randomSeed = -1)
         {
             if (randomSeed != -1) clusterTestUtils.InitRandom(randomSeed);
-            for (int i = 0; i < kvpairCount; i++)
+            for (var i = 0; i < kvpairCount; i++)
             {
                 var key = orderedKeys ? (keyOffset++).ToString() : clusterTestUtils.RandomStr(keyLength);
                 var value = r.Next();
@@ -319,7 +326,7 @@ namespace Garnet.test.cluster
             {
                 var key = orderedKeys ? (keyOffset++).ToString() : clusterTestUtils.RandomStr(keyLength);
 
-                //Use slotMap
+                // Use slotMap
                 var keyBytes = Encoding.ASCII.GetBytes(key);
                 if (slotMap != null)
                 {
@@ -341,7 +348,7 @@ namespace Garnet.test.cluster
         public void PopulatePrimaryWithObjects(ref Dictionary<string, List<int>> kvPairsObj, int keyLength, int kvpairCount, int primaryIndex, int countPerList = 32, int itemSize = 1 << 20, int randomSeed = -1, bool set = false)
         {
             if (randomSeed != -1) clusterTestUtils.InitRandom(randomSeed);
-            for (int i = 0; i < kvpairCount; i++)
+            for (var i = 0; i < kvpairCount; i++)
             {
                 var key = clusterTestUtils.RandomStr(keyLength);
                 var value = !set ? clusterTestUtils.RandomList(countPerList, itemSize) : clusterTestUtils.RandomHset(countPerList, itemSize);
@@ -349,7 +356,6 @@ namespace Garnet.test.cluster
                     key = clusterTestUtils.RandomStr(keyLength);
                 kvPairsObj.Add(key, value);
 
-                //int insertCount = 0;
                 if (!set)
                     clusterTestUtils.Lpush(primaryIndex, key, value, logger);
                 else
@@ -370,12 +376,12 @@ namespace Garnet.test.cluster
 
         public void PopulatePrimaryAndTakeCheckpointTask(bool performRMW, bool disableObjects, bool takeCheckpoint, int iter = 5)
         {
-            int keyLength = 32;
-            int kvpairCount = 64;
-            int addCount = 5;
-            for (int i = 0; i < iter; i++)
+            var keyLength = 32;
+            var kvpairCount = 64;
+            var addCount = 5;
+            for (var i = 0; i < iter; i++)
             {
-                //Populate Primary
+                // Populate Primary
                 if (disableObjects)
                 {
                     if (!performRMW)
@@ -409,11 +415,11 @@ namespace Garnet.test.cluster
                     replicaIndex = slotMap[slot];
                 }
 
-                var retVal = clusterTestUtils.GetKey(replicaIndex, keyBytes, out int _, out string _, out int _, out ResponseState responseState, logger: logger);
-                while (retVal == null || (value != int.Parse(retVal)))
+                var retVal = clusterTestUtils.GetKey(replicaIndex, keyBytes, out var _, out var _, out var _, out var responseState, logger: logger);
+                while (responseState != ResponseState.OK || retVal == null || (value != int.Parse(retVal)))
                 {
-                    retVal = clusterTestUtils.GetKey(replicaIndex, keyBytes, out int _, out string _, out int _, out responseState, logger: logger);
-                    Thread.Yield();
+                    retVal = clusterTestUtils.GetKey(replicaIndex, keyBytes, out var _, out var _, out var _, out responseState, logger: logger);
+                    ClusterTestUtils.BackOff();
                 }
                 Assert.AreEqual(ResponseState.OK, responseState);
                 Assert.AreEqual(value, int.Parse(retVal), $"replOffset > p:{clusterTestUtils.GetReplicationOffset(primaryIndex, logger: logger)}, s[{replicaIndex}]:{clusterTestUtils.GetReplicationOffset(replicaIndex)}");
@@ -437,7 +443,7 @@ namespace Garnet.test.cluster
                         result = clusterTestUtils.Lrange(nodeIndex, key, logger);
                     else
                         result = clusterTestUtils.Smembers(nodeIndex, key, logger);
-                    Thread.Yield();
+                    ClusterTestUtils.BackOff();
                 }
                 if (!set)
                     Assert.AreEqual(elements, result);
@@ -448,7 +454,7 @@ namespace Garnet.test.cluster
 
         public void SendAndValidateKeys(int primaryIndex, int replicaIndex, int keyLength, int numKeys = 1)
         {
-            for (int i = 0; i < numKeys; i++)
+            for (var i = 0; i < numKeys; i++)
             {
                 var key = orderedKeys ? (keyOffset++).ToString() : clusterTestUtils.RandomStr(keyLength);
                 var keyBytes = Encoding.ASCII.GetBytes(key);
@@ -459,10 +465,10 @@ namespace Garnet.test.cluster
                 clusterTestUtils.WaitForReplicaAofSync(primaryIndex, replicaIndex);
 
                 var retVal = clusterTestUtils.GetKey(replicaIndex, keyBytes, out int _, out string _, out int _, out ResponseState responseState, logger: logger);
-                while (retVal == null || (value != int.Parse(retVal)))
+                while (responseState != ResponseState.OK || retVal == null || (value != int.Parse(retVal)))
                 {
                     retVal = clusterTestUtils.GetKey(replicaIndex, keyBytes, out int _, out string _, out int _, out responseState, logger: logger);
-                    Thread.Yield();
+                    ClusterTestUtils.BackOff();
                 }
                 Assert.AreEqual(ResponseState.OK, responseState);
                 Assert.AreEqual(value, int.Parse(retVal), $"replOffset > p:{clusterTestUtils.GetReplicationOffset(primaryIndex, logger: logger)}, s[{replicaIndex}]:{clusterTestUtils.GetReplicationOffset(replicaIndex)}");
@@ -471,31 +477,11 @@ namespace Garnet.test.cluster
 
         public void ClusterFailoveSpinWait(int replicaNodeIndex, ILogger logger)
         {
-            //Failover primary
-            clusterTestUtils.ClusterFailover(replicaNodeIndex, "ABORT", logger);
-            clusterTestUtils.ClusterFailover(replicaNodeIndex, logger: logger);
+            // Failover primary
+            _ = clusterTestUtils.ClusterFailover(replicaNodeIndex, "ABORT", logger);
+            _ = clusterTestUtils.ClusterFailover(replicaNodeIndex, logger: logger);
 
-            int retryCount = 0;
-            while (true)
-            {
-                var role = clusterTestUtils.GetReplicationRole(replicaNodeIndex, logger: logger);
-                if (role.Equals("master")) break;
-                if (retryCount++ > 10000)
-                {
-                    logger?.LogError("CLUSTER FAILOVER retry count reached");
-                    Assert.Fail();
-                }
-                Thread.Sleep(1000);
-            }
-        }
-
-        public void ClusterFailoverRetry(int replicaNodeIndex)
-        {
-            //Failover primary
-            clusterTestUtils.ClusterFailover(replicaNodeIndex, "ABORT", logger);
-            clusterTestUtils.ClusterFailover(replicaNodeIndex, logger: logger);
-
-            int retryCount = 0;
+            var retryCount = 0;
             while (true)
             {
                 var role = clusterTestUtils.GetReplicationRole(replicaNodeIndex, logger: logger);
@@ -512,25 +498,25 @@ namespace Garnet.test.cluster
         public void AttachAndWaitForSync(int primary_count, int replica_count, bool disableObjects)
         {
             var primaryId = clusterTestUtils.GetNodeIdFromNode(0, logger);
-            //Issue meet to replicas
-            for (int i = primary_count; i < primary_count + replica_count; i++)
+            // Issue meet to replicas
+            for (var i = primary_count; i < primary_count + replica_count; i++)
                 clusterTestUtils.Meet(i, 0);
 
-            //Wait until primary node is known so as not to fail replicate
-            for (int i = primary_count; i < primary_count + replica_count; i++)
+            // Wait until primary node is known so as not to fail replicate
+            for (var i = primary_count; i < primary_count + replica_count; i++)
                 clusterTestUtils.WaitUntilNodeIdIsKnown(i, primaryId, logger: logger);
 
-            //Issue cluster replicate and bump epoch manually to capture config.
-            for (int i = primary_count; i < primary_count + replica_count; i++)
+            // Issue cluster replicate and bump epoch manually to capture config.
+            for (var i = primary_count; i < primary_count + replica_count; i++)
             {
-                clusterTestUtils.ClusterReplicate(i, primaryId, async: true, logger: logger);
+                _ = clusterTestUtils.ClusterReplicate(i, primaryId, async: true, logger: logger);
                 clusterTestUtils.BumpEpoch(i, logger: logger);
             }
 
             if (!checkpointTask.Wait(TimeSpan.FromSeconds(100))) Assert.Fail("Checkpoint task timeout");
 
-            //Wait for recovery and AofSync
-            for (int i = primary_count; i < replica_count; i++)
+            // Wait for recovery and AofSync
+            for (var i = primary_count; i < replica_count; i++)
             {
                 clusterTestUtils.WaitForReplicaRecovery(i, logger);
                 clusterTestUtils.WaitForReplicaAofSync(0, i, logger);
@@ -538,8 +524,8 @@ namespace Garnet.test.cluster
 
             clusterTestUtils.WaitForConnectedReplicaCount(0, replica_count, logger: logger);
 
-            //Validate data on replicas
-            for (int i = primary_count; i < replica_count; i++)
+            // Validate data on replicas
+            for (var i = primary_count; i < replica_count; i++)
             {
                 if (disableObjects)
                     ValidateKVCollectionAgainstReplica(ref kvPairs, i);

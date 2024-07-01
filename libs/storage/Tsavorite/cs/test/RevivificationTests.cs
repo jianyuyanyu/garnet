@@ -170,7 +170,7 @@ namespace Tsavorite.test.Revivification
     [TestFixture]
     class RevivificationFixedLenTests
     {
-        internal class RevivificationFixedLenFunctions : SimpleFunctions<int, int>
+        internal class RevivificationFixedLenFunctions : SimpleSimpleFunctions<int, int>
         {
         }
 
@@ -181,6 +181,7 @@ namespace Tsavorite.test.Revivification
 
         private TsavoriteKV<int, int> store;
         private ClientSession<int, int, int, int, Empty, RevivificationFixedLenFunctions> session;
+        private BasicContext<int, int, int, int, Empty, RevivificationFixedLenFunctions> bContext;
         private IDevice log;
 
         [SetUp]
@@ -189,16 +190,10 @@ namespace Tsavorite.test.Revivification
             DeleteDirectory(MethodTestDir, wait: true);
             log = Devices.CreateLogDevice(Path.Combine(MethodTestDir, "test.log"), deleteOnClose: true);
 
-            var concurrencyControlMode = ConcurrencyControlMode.LockTable;
             double? revivifiableFraction = default;
             RecordElision? recordElision = default;
             foreach (var arg in TestContext.CurrentContext.Test.Arguments)
             {
-                if (arg is ConcurrencyControlMode ccm)
-                {
-                    concurrencyControlMode = ccm;
-                    continue;
-                }
                 if (arg is RevivifiableFraction frac)
                 {
                     revivifiableFraction = RevivificationTestUtils.GetRevivifiableFraction(frac);
@@ -217,9 +212,10 @@ namespace Tsavorite.test.Revivification
             if (recordElision.HasValue)
                 revivificationSettings.RestoreDeletedRecordsIfBinIsFull = recordElision.Value == RecordElision.NoElide;
             store = new TsavoriteKV<int, int>(1L << 18, new LogSettings { LogDevice = log, ObjectLogDevice = null, PageSizeBits = 12, MemorySizeBits = 20 },
-                                            concurrencyControlMode: concurrencyControlMode, revivificationSettings: revivificationSettings);
+                                            revivificationSettings: revivificationSettings);
             functions = new RevivificationFixedLenFunctions();
             session = store.NewSession<int, int, Empty, RevivificationFixedLenFunctions>(functions);
+            bContext = session.BasicContext;
         }
 
         [TearDown]
@@ -239,7 +235,7 @@ namespace Tsavorite.test.Revivification
         {
             for (int key = 0; key < numRecords; key++)
             {
-                var status = session.Upsert(key, key * valueMult);
+                var status = bContext.Upsert(key, key * valueMult);
                 Assert.IsTrue(status.Record.Created, status.ToString());
             }
         }
@@ -247,9 +243,7 @@ namespace Tsavorite.test.Revivification
         [Test]
         [Category(RevivificationCategory)]
         [Category(SmokeTestCategory)]
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060:Remove unused parameter", Justification = "concurrencyControlMode is used by Setup")]
-        public void SimpleFixedLenTest([Values] DeleteDest deleteDest, [Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp,
-                [Values(ConcurrencyControlMode.LockTable, ConcurrencyControlMode.RecordIsolation)] ConcurrencyControlMode concurrencyControlMode)
+        public void SimpleFixedLenTest([Values] DeleteDest deleteDest, [Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp)
         {
             Populate();
 
@@ -262,7 +256,7 @@ namespace Tsavorite.test.Revivification
                 RevivificationTestUtils.AssertElidable(store, deleteKey);
             var tailAddress = store.Log.TailAddress;
 
-            session.Delete(deleteKey);
+            bContext.Delete(deleteKey);
             Assert.AreEqual(tailAddress, store.Log.TailAddress);
 
             var updateKey = deleteDest == DeleteDest.InChain ? deleteKey : numRecords + 1;
@@ -275,9 +269,9 @@ namespace Tsavorite.test.Revivification
             }
 
             if (updateOp == UpdateOp.Upsert)
-                session.Upsert(updateKey, updateValue);
+                bContext.Upsert(updateKey, updateValue);
             else if (updateOp == UpdateOp.RMW)
-                session.RMW(updateKey, updateValue);
+                bContext.RMW(updateKey, updateValue);
 
             if (!stayInChain)
                 RevivificationTestUtils.WaitForRecords(store, want: false);
@@ -287,9 +281,7 @@ namespace Tsavorite.test.Revivification
         [Test]
         [Category(RevivificationCategory)]
         [Category(SmokeTestCategory)]
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060:Remove unused parameter", Justification = "concurrencyControlMode is used by Setup")]
-        public void UnelideTest([Values] RecordElision elision, [Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp,
-                [Values(ConcurrencyControlMode.LockTable, ConcurrencyControlMode.RecordIsolation)] ConcurrencyControlMode concurrencyControlMode)
+        public void UnelideTest([Values] RecordElision elision, [Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp)
         {
             Populate();
 
@@ -298,7 +290,7 @@ namespace Tsavorite.test.Revivification
             // First delete all keys. This will overflow the bin.
             for (var key = 0; key < numRecords; ++key)
             {
-                session.Delete(key);
+                bContext.Delete(key);
                 Assert.AreEqual(tailAddress, store.Log.TailAddress);
             }
 
@@ -310,9 +302,9 @@ namespace Tsavorite.test.Revivification
             {
                 var value = key + valueMult;
                 if (updateOp == UpdateOp.Upsert)
-                    session.Upsert(key, value);
+                    bContext.Upsert(key, value);
                 else if (updateOp == UpdateOp.RMW)
-                    session.RMW(key, value);
+                    bContext.RMW(key, value);
             }
 
             // Now re-add the keys. For the elision case, we should see tailAddress grow sharply as only the records in the bin are available
@@ -331,32 +323,28 @@ namespace Tsavorite.test.Revivification
         [Test]
         [Category(RevivificationCategory)]
         [Category(SmokeTestCategory)]
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060:Remove unused parameter", Justification = "revivifiableFraction and concurrencyControlMode are used by Setup")]
-        public void SimpleMinAddressAddTest([Values] RevivifiableFraction revivifiableFraction,
-                [Values(ConcurrencyControlMode.LockTable, ConcurrencyControlMode.RecordIsolation)] ConcurrencyControlMode concurrencyControlMode)
+        public void SimpleMinAddressAddTest([Values] RevivifiableFraction revivifiableFraction)
         {
             Populate();
 
             // This should not go to FreeList because it's below the RevivifiableFraction
-            Assert.IsTrue(session.Delete(2).Found);
+            Assert.IsTrue(bContext.Delete(2).Found);
             Assert.AreEqual(0, RevivificationTestUtils.GetFreeRecordCount(store));
 
             // This should go to FreeList because it's above the RevivifiableFraction
-            Assert.IsTrue(session.Delete(numRecords - 1).Found);
+            Assert.IsTrue(bContext.Delete(numRecords - 1).Found);
             Assert.AreEqual(1, RevivificationTestUtils.GetFreeRecordCount(store));
         }
 
         [Test]
         [Category(RevivificationCategory)]
         [Category(SmokeTestCategory)]
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060:Remove unused parameter", Justification = "revivifiableFraction and concurrencyControlMode are used by Setup")]
-        public void SimpleMinAddressTakeTest([Values] RevivifiableFraction revivifiableFraction, [Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp,
-                [Values(ConcurrencyControlMode.LockTable, ConcurrencyControlMode.RecordIsolation)] ConcurrencyControlMode concurrencyControlMode)
+        public void SimpleMinAddressTakeTest([Values] RevivifiableFraction revivifiableFraction, [Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp)
         {
             Populate();
 
             // This should go to FreeList because it's above the RevivifiableFraction
-            Assert.IsTrue(session.Delete(numRecords - 1).Found);
+            Assert.IsTrue(bContext.Delete(numRecords - 1).Found);
             Assert.AreEqual(1, RevivificationTestUtils.GetFreeRecordCount(store));
             RevivificationTestUtils.WaitForRecords(store, want: true);
 
@@ -367,7 +355,7 @@ namespace Tsavorite.test.Revivification
             int maxRecord = numRecords * 2;
             for (int key = numRecords; key < maxRecord; key++)
             {
-                var status = session.Upsert(key, key * valueMult);
+                var status = bContext.Upsert(key, key * valueMult);
                 Assert.IsTrue(status.Record.Created, status.ToString());
             }
 
@@ -377,9 +365,9 @@ namespace Tsavorite.test.Revivification
             var tailAddress = store.Log.TailAddress;
 
             if (updateOp == UpdateOp.Upsert)
-                session.Upsert(maxRecord, maxRecord * valueMult);
+                bContext.Upsert(maxRecord, maxRecord * valueMult);
             else if (updateOp == UpdateOp.RMW)
-                session.RMW(maxRecord, maxRecord * valueMult);
+                bContext.RMW(maxRecord, maxRecord * valueMult);
 
             Assert.Less(tailAddress, store.Log.TailAddress, "Expected tail address to grow (record was not revivified)");
         }
@@ -441,7 +429,7 @@ namespace Tsavorite.test.Revivification
                     var compareLength = Math.Min(functionsKey.Length, valueLengthRemaining);
                     Span<byte> valueSpan = functionsValue.AsSpan().Slice(valueOffset, compareLength);
                     Span<byte> keySpan = functionsKey.AsSpan()[..compareLength];
-                    Assert.IsTrue(valueSpan.SequenceEqual(keySpan), $"functionsValue (offset {valueOffset}, len {compareLength}: {SpanByte.FromFixedSpan(valueSpan)}) does not match functionsKey ({SpanByte.FromFixedSpan(keySpan)})");
+                    Assert.IsTrue(valueSpan.SequenceEqual(keySpan), $"functionsValue (offset {valueOffset}, len {compareLength}: {SpanByte.FromPinnedSpan(valueSpan)}) does not match functionsKey ({SpanByte.FromPinnedSpan(keySpan)})");
                     valueLengthRemaining -= compareLength;
                 }
             }
@@ -554,10 +542,10 @@ namespace Tsavorite.test.Revivification
                 return base.ConcurrentDeleter(ref key, ref value, ref deleteInfo, ref recordInfo);
             }
 
-            public override void PostCopyUpdater(ref SpanByte key, ref SpanByte input, ref SpanByte oldValue, ref SpanByte newValue, ref SpanByteAndMemory output, ref RMWInfo rmwInfo)
+            public override bool PostCopyUpdater(ref SpanByte key, ref SpanByte input, ref SpanByte oldValue, ref SpanByte newValue, ref SpanByteAndMemory output, ref RMWInfo rmwInfo)
             {
                 AssertInfoValid(ref rmwInfo);
-                base.PostCopyUpdater(ref key, ref input, ref oldValue, ref newValue, ref output, ref rmwInfo);
+                return base.PostCopyUpdater(ref key, ref input, ref oldValue, ref newValue, ref output, ref rmwInfo);
             }
 
             public override void PostInitialUpdater(ref SpanByte key, ref SpanByte input, ref SpanByte value, ref SpanByteAndMemory output, ref RMWInfo rmwInfo)
@@ -608,6 +596,7 @@ namespace Tsavorite.test.Revivification
 
         private TsavoriteKV<SpanByte, SpanByte> store;
         private ClientSession<SpanByte, SpanByte, SpanByte, SpanByteAndMemory, Empty, RevivificationSpanByteFunctions> session;
+        private BasicContext<SpanByte, SpanByte, SpanByte, SpanByteAndMemory, Empty, RevivificationSpanByteFunctions> bContext;
         private IDevice log;
 
         [SetUp]
@@ -618,18 +607,12 @@ namespace Tsavorite.test.Revivification
 
             CollisionRange collisionRange = CollisionRange.None;
             LogSettings logSettings = new() { LogDevice = log, ObjectLogDevice = null, PageSizeBits = 17, MemorySizeBits = 20 };
-            var concurrencyControlMode = ConcurrencyControlMode.LockTable;
             var revivificationSettings = RevivificationSettings.PowerOf2Bins;
             foreach (var arg in TestContext.CurrentContext.Test.Arguments)
             {
                 if (arg is CollisionRange cr)
                 {
                     collisionRange = cr;
-                    continue;
-                }
-                if (arg is ConcurrencyControlMode ccm)
-                {
-                    concurrencyControlMode = ccm;
                     continue;
                 }
                 if (arg is PendingOp)
@@ -646,10 +629,11 @@ namespace Tsavorite.test.Revivification
             }
 
             comparer = new RevivificationSpanByteComparer(collisionRange);
-            store = new TsavoriteKV<SpanByte, SpanByte>(1L << 16, logSettings, comparer: comparer, concurrencyControlMode: concurrencyControlMode, revivificationSettings: revivificationSettings);
+            store = new TsavoriteKV<SpanByte, SpanByte>(1L << 16, logSettings, comparer: comparer, revivificationSettings: revivificationSettings);
 
             functions = new RevivificationSpanByteFunctions(store);
             session = store.NewSession<SpanByte, SpanByteAndMemory, Empty, RevivificationSpanByteFunctions>(functions);
+            bContext = session.BasicContext;
             functions.session = session;
         }
 
@@ -671,10 +655,10 @@ namespace Tsavorite.test.Revivification
         void Populate(int from, int to)
         {
             Span<byte> keyVec = stackalloc byte[KeyLength];
-            var key = SpanByte.FromFixedSpan(keyVec);
+            var key = SpanByte.FromPinnedSpan(keyVec);
 
             Span<byte> inputVec = stackalloc byte[InitialLength];
-            var input = SpanByte.FromFixedSpan(inputVec);
+            var input = SpanByte.FromPinnedSpan(inputVec);
 
             functions.expectedSingleFullValueLength = functions.expectedConcurrentFullValueLength = RoundUpSpanByteFullValueLength(input);
 
@@ -685,7 +669,7 @@ namespace Tsavorite.test.Revivification
                 keyVec.Fill((byte)ii);
                 inputVec.Fill((byte)ii);
                 functions.expectedUsedValueLengths.Enqueue(input.TotalSize);
-                var status = session.Upsert(ref key, ref input, ref input, ref output);
+                var status = bContext.Upsert(ref key, ref input, ref input, ref output);
                 Assert.IsTrue(status.Record.Created, status.ToString());
                 Assert.IsEmpty(functions.expectedUsedValueLengths);
             }
@@ -696,16 +680,14 @@ namespace Tsavorite.test.Revivification
         [Test]
         [Category(RevivificationCategory)]
         [Category(SmokeTestCategory)]
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060:Remove unused parameter", Justification = "concurrencyControlMode is used by Setup")]
-        public void SpanByteNoRevivLengthTest([Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp, [Values] Growth growth,
-                [Values(ConcurrencyControlMode.LockTable, ConcurrencyControlMode.RecordIsolation)] ConcurrencyControlMode concurrencyControlMode)
+        public void SpanByteNoRevivLengthTest([Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp, [Values] Growth growth)
         {
             Populate();
 
             Span<byte> keyVec = stackalloc byte[KeyLength];
             byte fillByte = 42;
             keyVec.Fill(fillByte);
-            var key = SpanByte.FromFixedSpan(keyVec);
+            var key = SpanByte.FromPinnedSpan(keyVec);
 
             // Do NOT delete; this is a no-reviv test of lengths
 
@@ -723,7 +705,7 @@ namespace Tsavorite.test.Revivification
             functions.expectedConcurrentFullValueLength = RoundUpSpanByteFullValueLength(InitialLength);
 
             Span<byte> inputVec = stackalloc byte[functions.expectedInputLength];
-            var input = SpanByte.FromFixedSpan(inputVec);
+            var input = SpanByte.FromPinnedSpan(inputVec);
             inputVec.Fill(fillByte);
 
             // For Grow, we won't be able to satisfy the request with a revivification, and the new value length will be GrowLength
@@ -734,9 +716,9 @@ namespace Tsavorite.test.Revivification
             SpanByteAndMemory output = new();
 
             if (updateOp == UpdateOp.Upsert)
-                session.Upsert(ref key, ref input, ref input, ref output);
+                bContext.Upsert(ref key, ref input, ref input, ref output);
             else if (updateOp == UpdateOp.RMW)
-                session.RMW(ref key, ref input);
+                bContext.RMW(ref key, ref input);
             Assert.IsEmpty(functions.expectedUsedValueLengths);
 
             if (growth == Growth.Shrink)
@@ -746,7 +728,7 @@ namespace Tsavorite.test.Revivification
 
                 // Now let's see if we have the correct expected extra length in the destination.
                 inputVec = stackalloc byte[InitialLength / 2];  // Grow this from ShrinkLength to InitialLength
-                input = SpanByte.FromFixedSpan(inputVec);
+                input = SpanByte.FromPinnedSpan(inputVec);
                 inputVec.Fill(fillByte);
 
                 functions.expectedInputLength = InitialLength / 2;
@@ -755,9 +737,9 @@ namespace Tsavorite.test.Revivification
                 functions.expectedUsedValueLengths.Enqueue(input.TotalSize);
 
                 if (updateOp == UpdateOp.Upsert)
-                    session.Upsert(ref key, ref input, ref input, ref output);
+                    bContext.Upsert(ref key, ref input, ref input, ref output);
                 else if (updateOp == UpdateOp.RMW)
-                    session.RMW(ref key, ref input);
+                    bContext.RMW(ref key, ref input);
                 Assert.IsEmpty(functions.expectedUsedValueLengths);
             }
         }
@@ -765,9 +747,7 @@ namespace Tsavorite.test.Revivification
         [Test]
         [Category(RevivificationCategory)]
         [Category(SmokeTestCategory)]
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060:Remove unused parameter", Justification = "concurrencyControlMode is used by Setup")]
-        public void SpanByteSimpleTest([Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp,
-                [Values(ConcurrencyControlMode.LockTable, ConcurrencyControlMode.RecordIsolation)] ConcurrencyControlMode concurrencyControlMode)
+        public void SpanByteSimpleTest([Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp)
         {
             Populate();
 
@@ -776,16 +756,16 @@ namespace Tsavorite.test.Revivification
             Span<byte> keyVec = stackalloc byte[KeyLength];
             byte fillByte = 42;
             keyVec.Fill(fillByte);
-            var key = SpanByte.FromFixedSpan(keyVec);
+            var key = SpanByte.FromPinnedSpan(keyVec);
 
             functions.expectedUsedValueLengths.Enqueue(SpanByteTotalSize(InitialLength));
-            var status = session.Delete(ref key);
+            var status = bContext.Delete(ref key);
             Assert.IsTrue(status.Found, status.ToString());
 
             Assert.AreEqual(tailAddress, store.Log.TailAddress);
 
             Span<byte> inputVec = stackalloc byte[InitialLength];
-            var input = SpanByte.FromFixedSpan(inputVec);
+            var input = SpanByte.FromPinnedSpan(inputVec);
             inputVec.Fill(fillByte);
 
             SpanByteAndMemory output = new();
@@ -799,18 +779,16 @@ namespace Tsavorite.test.Revivification
             RevivificationTestUtils.WaitForRecords(store, want: true);
 
             if (updateOp == UpdateOp.Upsert)
-                session.Upsert(ref key, ref input, ref input, ref output);
+                bContext.Upsert(ref key, ref input, ref input, ref output);
             else if (updateOp == UpdateOp.RMW)
-                session.RMW(ref key, ref input);
+                bContext.RMW(ref key, ref input);
             Assert.AreEqual(tailAddress, store.Log.TailAddress);
         }
 
         [Test]
         [Category(RevivificationCategory)]
         [Category(SmokeTestCategory)]
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060:Remove unused parameter", Justification = "concurrencyControlMode is used by Setup")]
-        public void SpanByteIPUGrowAndRevivifyTest([Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp,
-                [Values(ConcurrencyControlMode.LockTable, ConcurrencyControlMode.RecordIsolation)] ConcurrencyControlMode concurrencyControlMode)
+        public void SpanByteIPUGrowAndRevivifyTest([Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp)
         {
             Populate();
 
@@ -819,10 +797,10 @@ namespace Tsavorite.test.Revivification
             Span<byte> keyVec = stackalloc byte[KeyLength];
             byte fillByte = 42;
             keyVec.Fill(fillByte);
-            var key = SpanByte.FromFixedSpan(keyVec);
+            var key = SpanByte.FromPinnedSpan(keyVec);
 
             Span<byte> inputVec = stackalloc byte[GrowLength];
-            var input = SpanByte.FromFixedSpan(inputVec);
+            var input = SpanByte.FromPinnedSpan(inputVec);
             inputVec.Fill(fillByte);
 
             SpanByteAndMemory output = new();
@@ -839,12 +817,12 @@ namespace Tsavorite.test.Revivification
             // Get a free record from a failed IPU.
             if (updateOp == UpdateOp.Upsert)
             {
-                var status = session.Upsert(ref key, ref input, ref input, ref output);
+                var status = bContext.Upsert(ref key, ref input, ref input, ref output);
                 Assert.IsTrue(status.Record.Created, status.ToString());
             }
             else if (updateOp == UpdateOp.RMW)
             {
-                var status = session.RMW(ref key, ref input);
+                var status = bContext.RMW(ref key, ref input);
                 Assert.IsTrue(status.Record.CopyUpdated, status.ToString());
             }
 
@@ -858,7 +836,7 @@ namespace Tsavorite.test.Revivification
 
             // Get a new key and shrink the requested length so we revivify the free record from the failed IPU.
             keyVec.Fill(numRecords + 1);
-            input = SpanByte.FromFixedSpan(inputVec.Slice(0, InitialLength));
+            input = SpanByte.FromPinnedSpan(inputVec.Slice(0, InitialLength));
 
             functions.expectedInputLength = InitialLength;
             functions.expectedSingleDestLength = InitialLength;
@@ -868,12 +846,12 @@ namespace Tsavorite.test.Revivification
 
             if (updateOp == UpdateOp.Upsert)
             {
-                var status = session.Upsert(ref key, ref input, ref input, ref output);
+                var status = bContext.Upsert(ref key, ref input, ref input, ref output);
                 Assert.IsTrue(status.Record.Created, status.ToString());
             }
             else if (updateOp == UpdateOp.RMW)
             {
-                var status = session.RMW(ref key, ref input);
+                var status = bContext.RMW(ref key, ref input);
                 Assert.IsTrue(status.Record.Created, status.ToString());
             }
 
@@ -885,9 +863,7 @@ namespace Tsavorite.test.Revivification
         [Test]
         [Category(RevivificationCategory)]
         [Category(SmokeTestCategory)]
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060:Remove unused parameter", Justification = "concurrencyControlMode is used by Setup")]
-        public void SpanByteReadOnlyMinAddressTest([Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp,
-                [Values(ConcurrencyControlMode.LockTable, ConcurrencyControlMode.RecordIsolation)] ConcurrencyControlMode concurrencyControlMode)
+        public void SpanByteReadOnlyMinAddressTest([Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp)
         {
             Populate();
 
@@ -896,17 +872,17 @@ namespace Tsavorite.test.Revivification
             Span<byte> keyVec = stackalloc byte[KeyLength];
             byte fillByte = 42;
             keyVec.Fill(fillByte);
-            var key = SpanByte.FromFixedSpan(keyVec);
+            var key = SpanByte.FromPinnedSpan(keyVec);
 
             functions.expectedUsedValueLengths.Enqueue(SpanByteTotalSize(InitialLength));
-            var status = session.Delete(ref key);
+            var status = bContext.Delete(ref key);
             Assert.IsTrue(status.Found, status.ToString());
 
             Assert.AreEqual(tailAddress, store.Log.TailAddress);
             store.Log.ShiftReadOnlyAddress(store.Log.TailAddress, wait: true);
 
             Span<byte> inputVec = stackalloc byte[InitialLength];
-            var input = SpanByte.FromFixedSpan(inputVec);
+            var input = SpanByte.FromPinnedSpan(inputVec);
             inputVec.Fill(fillByte);
 
             SpanByteAndMemory output = new();
@@ -918,9 +894,9 @@ namespace Tsavorite.test.Revivification
             functions.expectedUsedValueLengths.Enqueue(SpanByteTotalSize(InitialLength));
 
             if (updateOp == UpdateOp.Upsert)
-                session.Upsert(ref key, ref input, ref input, ref output);
+                bContext.Upsert(ref key, ref input, ref input, ref output);
             else if (updateOp == UpdateOp.RMW)
-                session.RMW(ref key, ref input);
+                bContext.RMW(ref key, ref input);
             Assert.Greater(store.Log.TailAddress, tailAddress);
         }
 
@@ -941,10 +917,10 @@ namespace Tsavorite.test.Revivification
             // Delete key below (what will be) the readonly line. This is for a target for the test; the record should not be revivified.
             Span<byte> keyVecDelBelowRO = stackalloc byte[KeyLength];
             keyVecDelBelowRO.Fill(delBelowRO);
-            var delKeyBelowRO = SpanByte.FromFixedSpan(keyVecDelBelowRO);
+            var delKeyBelowRO = SpanByte.FromPinnedSpan(keyVecDelBelowRO);
 
             functions.expectedUsedValueLengths.Enqueue(SpanByteTotalSize(InitialLength));
-            var status = session.Delete(ref delKeyBelowRO);
+            var status = bContext.Delete(ref delKeyBelowRO);
             Assert.IsTrue(status.Found, status.ToString());
 
             if (flushMode == FlushMode.ReadOnly)
@@ -960,13 +936,13 @@ namespace Tsavorite.test.Revivification
             // If not stayInChain, this also puts two elements in the free list; one should be skipped over on Take() as it is below readonly.
             Span<byte> keyVecDelAboveRO = stackalloc byte[KeyLength];
             keyVecDelAboveRO.Fill(delAboveRO);
-            var delKeyAboveRO = SpanByte.FromFixedSpan(keyVecDelAboveRO);
+            var delKeyAboveRO = SpanByte.FromPinnedSpan(keyVecDelAboveRO);
 
             if (!stayInChain && collisionRange == CollisionRange.None)  // CollisionRange.Ten has a valid .PreviousAddress so won't be moved to FreeList
                 RevivificationTestUtils.AssertElidable(store, ref delKeyAboveRO);
 
             functions.expectedUsedValueLengths.Enqueue(SpanByteTotalSize(InitialLength));
-            status = session.Delete(ref delKeyAboveRO);
+            status = bContext.Delete(ref delKeyAboveRO);
             Assert.IsTrue(status.Found, status.ToString());
 
             if (stayInChain)
@@ -992,7 +968,6 @@ namespace Tsavorite.test.Revivification
         [Category(RevivificationCategory)]
         [Category(SmokeTestCategory)]
         //[Repeat(300)]
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060:Remove unused parameter", Justification = "concurrencyControlMode is used by Setup")]
         public void SpanByteUpdateRevivifyTest([Values] DeleteDest deleteDest, [Values] UpdateKey updateKey,
                                           [Values] CollisionRange collisionRange, [Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp)
         {
@@ -1008,12 +983,12 @@ namespace Tsavorite.test.Revivification
             long tailAddress = PrepareDeletes(stayInChain, delAboveRO, FlushMode.ReadOnly, collisionRange);
 
             Span<byte> inputVec = stackalloc byte[InitialLength];
-            var input = SpanByte.FromFixedSpan(inputVec);
+            var input = SpanByte.FromPinnedSpan(inputVec);
 
             SpanByteAndMemory output = new();
 
             Span<byte> keyVecToTest = stackalloc byte[KeyLength];
-            var keyToTest = SpanByte.FromFixedSpan(keyVecToTest);
+            var keyToTest = SpanByte.FromPinnedSpan(keyVecToTest);
 
             bool expectReviv;
             if (updateKey == UpdateKey.Unfound || updateKey == UpdateKey.CopiedBelowRO)
@@ -1058,9 +1033,9 @@ namespace Tsavorite.test.Revivification
             functions.expectedUsedValueLengths.Enqueue(SpanByteTotalSize(InitialLength));
 
             if (updateOp == UpdateOp.Upsert)
-                session.Upsert(ref keyToTest, ref input, ref input, ref output);
+                bContext.Upsert(ref keyToTest, ref input, ref input, ref output);
             else if (updateOp == UpdateOp.RMW)
-                session.RMW(ref keyToTest, ref input);
+                bContext.RMW(ref keyToTest, ref input);
 
             if (expectReviv)
                 Assert.AreEqual(tailAddress, store.Log.TailAddress);
@@ -1071,9 +1046,7 @@ namespace Tsavorite.test.Revivification
         [Test]
         [Category(RevivificationCategory)]
         [Category(SmokeTestCategory)]
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060:Remove unused parameter", Justification = "concurrencyControlMode is used by Setup")]
-        public void SimpleRevivifyTest([Values] DeleteDest deleteDest, [Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp,
-                [Values(ConcurrencyControlMode.LockTable, ConcurrencyControlMode.RecordIsolation)] ConcurrencyControlMode concurrencyControlMode)
+        public void SimpleRevivifyTest([Values] DeleteDest deleteDest, [Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp)
         {
             Populate();
 
@@ -1085,18 +1058,18 @@ namespace Tsavorite.test.Revivification
             byte chainKey = numRecords / 2 - 1;
             Span<byte> keyVec = stackalloc byte[KeyLength];
             keyVec.Fill(chainKey);
-            var key = SpanByte.FromFixedSpan(keyVec);
+            var key = SpanByte.FromPinnedSpan(keyVec);
             if (!stayInChain)
                 RevivificationTestUtils.AssertElidable(store, ref key);
 
             functions.expectedUsedValueLengths.Enqueue(SpanByteTotalSize(InitialLength));
-            var status = session.Delete(ref key);
+            var status = bContext.Delete(ref key);
             Assert.IsTrue(status.Found, status.ToString());
 
             var tailAddress = store.Log.TailAddress;
 
             Span<byte> inputVec = stackalloc byte[InitialLength];
-            var input = SpanByte.FromFixedSpan(inputVec);
+            var input = SpanByte.FromPinnedSpan(inputVec);
             inputVec.Fill(chainKey);
 
             SpanByteAndMemory output = new();
@@ -1107,9 +1080,9 @@ namespace Tsavorite.test.Revivification
             // Revivify in the chain. Because this stays in the chain, the expectedFullValueLength is roundup(InitialLength)
             functions.expectedUsedValueLengths.Enqueue(SpanByteTotalSize(InitialLength));
             if (updateOp == UpdateOp.Upsert)
-                session.Upsert(ref key, ref input, ref input, ref output);
+                bContext.Upsert(ref key, ref input, ref input, ref output);
             else if (updateOp == UpdateOp.RMW)
-                session.RMW(ref key, ref input);
+                bContext.RMW(ref key, ref input);
 
             Assert.AreEqual(tailAddress, store.Log.TailAddress);
         }
@@ -1117,10 +1090,7 @@ namespace Tsavorite.test.Revivification
         [Test]
         [Category(RevivificationCategory)]
         [Category(SmokeTestCategory)]
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060:Remove unused parameter", Justification = "concurrencyControlMode is used by Setup")]
-        public void DeleteEntireChainAndRevivifyTest([Values(CollisionRange.Ten)] CollisionRange collisionRange,
-                                                     [Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp,
-                                                     [Values(ConcurrencyControlMode.LockTable, ConcurrencyControlMode.RecordIsolation)] ConcurrencyControlMode concurrencyControlMode)
+        public void DeleteEntireChainAndRevivifyTest([Values(CollisionRange.Ten)] CollisionRange collisionRange, [Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp)
         {
             Populate();
 
@@ -1128,7 +1098,7 @@ namespace Tsavorite.test.Revivification
             byte chainKey = 5;
             Span<byte> keyVec = stackalloc byte[KeyLength];
             keyVec.Fill(chainKey);
-            var key = SpanByte.FromFixedSpan(keyVec);
+            var key = SpanByte.FromPinnedSpan(keyVec);
             var hash = comparer.GetHashCode64(ref key);
 
             List<byte> deletedSlots = new();
@@ -1139,7 +1109,7 @@ namespace Tsavorite.test.Revivification
                     continue;
 
                 functions.expectedUsedValueLengths.Enqueue(SpanByteTotalSize(InitialLength));
-                var status = session.Delete(ref key);
+                var status = bContext.Delete(ref key);
                 Assert.IsTrue(status.Found, status.ToString());
                 if (ii > RevivificationTestUtils.GetMinRevivifiableKey(store, numRecords))
                     deletedSlots.Add((byte)ii);
@@ -1153,7 +1123,7 @@ namespace Tsavorite.test.Revivification
             var tailAddress = store.Log.TailAddress;
 
             Span<byte> inputVec = stackalloc byte[InitialLength];
-            var input = SpanByte.FromFixedSpan(inputVec);
+            var input = SpanByte.FromPinnedSpan(inputVec);
             inputVec.Fill(chainKey);
 
             SpanByteAndMemory output = new();
@@ -1165,9 +1135,9 @@ namespace Tsavorite.test.Revivification
 
                 functions.expectedUsedValueLengths.Enqueue(SpanByteTotalSize(InitialLength));
                 if (updateOp == UpdateOp.Upsert)
-                    session.Upsert(ref key, ref input, ref input, ref output);
+                    bContext.Upsert(ref key, ref input, ref input, ref output);
                 else if (updateOp == UpdateOp.RMW)
-                    session.RMW(ref key, ref input);
+                    bContext.RMW(ref key, ref input);
                 Assert.AreEqual(tailAddress, store.Log.TailAddress);
             }
         }
@@ -1175,17 +1145,14 @@ namespace Tsavorite.test.Revivification
         [Test]
         [Category(RevivificationCategory)]
         [Category(SmokeTestCategory)]
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060:Remove unused parameter", Justification = "concurrencyControlMode is used by Setup")]
-        public void DeleteAllRecordsAndRevivifyTest([Values(CollisionRange.None)] CollisionRange collisionRange,
-                                                    [Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp,
-                                                    [Values(ConcurrencyControlMode.LockTable, ConcurrencyControlMode.RecordIsolation)] ConcurrencyControlMode concurrencyControlMode)
+        public void DeleteAllRecordsAndRevivifyTest([Values(CollisionRange.None)] CollisionRange collisionRange, [Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp)
         {
             Populate();
 
             long tailAddress = store.Log.TailAddress;
 
             Span<byte> keyVec = stackalloc byte[KeyLength];
-            var key = SpanByte.FromFixedSpan(keyVec);
+            var key = SpanByte.FromPinnedSpan(keyVec);
 
             // "sizeof(int) +" because SpanByte has an int length prefix
             var recordSize = RecordInfo.GetLength() + RoundUp(sizeof(int) + keyVec.Length, 8) + RoundUp(sizeof(int) + InitialLength, 8);
@@ -1196,14 +1163,14 @@ namespace Tsavorite.test.Revivification
                 keyVec.Fill((byte)ii);
 
                 functions.expectedUsedValueLengths.Enqueue(SpanByteTotalSize(InitialLength));
-                var status = session.Delete(ref key);
+                var status = bContext.Delete(ref key);
                 Assert.IsTrue(status.Found, status.ToString());
             }
             Assert.AreEqual(tailAddress, store.Log.TailAddress);
             Assert.AreEqual(RevivificationTestUtils.GetRevivifiableRecordCount(store, numRecords), RevivificationTestUtils.GetFreeRecordCount(store), $"Expected numRecords ({numRecords}) free records");
 
             Span<byte> inputVec = stackalloc byte[InitialLength];
-            var input = SpanByte.FromFixedSpan(inputVec);
+            var input = SpanByte.FromPinnedSpan(inputVec);
 
             SpanByteAndMemory output = new();
 
@@ -1223,15 +1190,15 @@ namespace Tsavorite.test.Revivification
 
                 functions.expectedUsedValueLengths.Enqueue(SpanByteTotalSize(InitialLength));
                 if (updateOp == UpdateOp.Upsert)
-                    session.Upsert(ref key, ref input, ref input, ref output);
+                    bContext.Upsert(ref key, ref input, ref input, ref output);
                 else if (updateOp == UpdateOp.RMW)
-                    session.RMW(ref key, ref input);
+                    bContext.RMW(ref key, ref input);
                 if (ii < revivifiableKeyCount)
                     Assert.AreEqual(tailAddress, store.Log.TailAddress, $"unexpected new record for key {ii}");
                 else
                     Assert.Less(tailAddress, store.Log.TailAddress, $"unexpected revivified record for key {ii}");
 
-                var status = session.Read(ref key, ref output);
+                var status = bContext.Read(ref key, ref output);
                 Assert.IsTrue(status.Found, $"Expected to find key {ii}; status == {status}");
             }
 
@@ -1242,7 +1209,7 @@ namespace Tsavorite.test.Revivification
             for (var ii = 0; ii < numRecords; ++ii)
             {
                 keyVec.Fill((byte)ii);
-                var status = session.Read(ref key, ref output);
+                var status = bContext.Read(ref key, ref output);
                 Assert.IsTrue(status.Found, $"Expected to find key {ii}; status == {status}");
             }
         }
@@ -1250,13 +1217,12 @@ namespace Tsavorite.test.Revivification
         [Test]
         [Category(RevivificationCategory)]
         [Category(SmokeTestCategory)]
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060:Remove unused parameter", Justification = "concurrencyControlMode is used by Setup")]
-        public void DeleteAllRecordsAndTakeSnapshotTest([Values(ConcurrencyControlMode.LockTable, ConcurrencyControlMode.RecordIsolation)] ConcurrencyControlMode concurrencyControlMode)
+        public void DeleteAllRecordsAndTakeSnapshotTest()
         {
             Populate();
 
             Span<byte> keyVec = stackalloc byte[KeyLength];
-            var key = SpanByte.FromFixedSpan(keyVec);
+            var key = SpanByte.FromPinnedSpan(keyVec);
 
             // Delete
             for (var ii = 0; ii < numRecords; ++ii)
@@ -1264,7 +1230,7 @@ namespace Tsavorite.test.Revivification
                 keyVec.Fill((byte)ii);
 
                 functions.expectedUsedValueLengths.Enqueue(SpanByteTotalSize(InitialLength));
-                var status = session.Delete(ref key);
+                var status = bContext.Delete(ref key);
                 Assert.IsTrue(status.Found, status.ToString());
             }
             Assert.AreEqual(RevivificationTestUtils.GetRevivifiableRecordCount(store, numRecords), RevivificationTestUtils.GetFreeRecordCount(store), $"Expected numRecords ({numRecords}) free records");
@@ -1275,13 +1241,12 @@ namespace Tsavorite.test.Revivification
         [Test]
         [Category(RevivificationCategory)]
         [Category(SmokeTestCategory)]
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060:Remove unused parameter", Justification = "concurrencyControlMode is used by Setup")]
-        public void DeleteAllRecordsAndIterateTest([Values(ConcurrencyControlMode.LockTable, ConcurrencyControlMode.RecordIsolation)] ConcurrencyControlMode concurrencyControlMode)
+        public void DeleteAllRecordsAndIterateTest()
         {
             Populate();
 
             Span<byte> keyVec = stackalloc byte[KeyLength];
-            var key = SpanByte.FromFixedSpan(keyVec);
+            var key = SpanByte.FromPinnedSpan(keyVec);
 
             // Delete
             for (var ii = 0; ii < numRecords; ++ii)
@@ -1291,7 +1256,7 @@ namespace Tsavorite.test.Revivification
                 RevivificationTestUtils.AssertElidable(store, ref key);
 
                 functions.expectedUsedValueLengths.Enqueue(SpanByteTotalSize(InitialLength));
-                var status = session.Delete(ref key);
+                var status = bContext.Delete(ref key);
                 Assert.IsTrue(status.Found, status.ToString());
             }
             Assert.AreEqual(RevivificationTestUtils.GetRevivifiableRecordCount(store, numRecords), RevivificationTestUtils.GetFreeRecordCount(store), $"Expected numRecords ({numRecords}) free records");
@@ -1304,8 +1269,7 @@ namespace Tsavorite.test.Revivification
         [Test]
         [Category(RevivificationCategory)]
         [Category(SmokeTestCategory)]
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060:Remove unused parameter", Justification = "concurrencyControlMode is used by Setup")]
-        public void BinSelectionTest([Values(ConcurrencyControlMode.LockTable, ConcurrencyControlMode.RecordIsolation)] ConcurrencyControlMode concurrencyControlMode)
+        public void BinSelectionTest()
         {
             FreeRecordPool<SpanByte, SpanByte> pool = store.RevivificationManager.FreeRecordPool;
             int expectedBin = 0, recordSize = RevivificationTestUtils.GetMaxRecordSize(pool, expectedBin);
@@ -1332,8 +1296,7 @@ namespace Tsavorite.test.Revivification
         [Category(RevivificationCategory)]
         [Category(SmokeTestCategory)]
         //[Repeat(30)]
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060:Remove unused parameter", Justification = "concurrencyControlMode is used by Setup")]
-        public unsafe void ArtificialBinWrappingTest([Values(ConcurrencyControlMode.LockTable, ConcurrencyControlMode.RecordIsolation)] ConcurrencyControlMode concurrencyControlMode)
+        public unsafe void ArtificialBinWrappingTest()
         {
             FreeRecordPool<SpanByte, SpanByte> pool = store.RevivificationManager.FreeRecordPool;
 
@@ -1383,9 +1346,7 @@ namespace Tsavorite.test.Revivification
         [Category(RevivificationCategory)]
         [Category(SmokeTestCategory)]
         //[Repeat(3000)]
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060:Remove unused parameter", Justification = "concurrencyControlMode is used by Setup")]
-        public unsafe void LiveBinWrappingTest([Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp, [Values] WaitMode waitMode, [Values] DeleteDest deleteDest,
-                [Values(ConcurrencyControlMode.LockTable, ConcurrencyControlMode.RecordIsolation)] ConcurrencyControlMode concurrencyControlMode)
+        public unsafe void LiveBinWrappingTest([Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp, [Values] WaitMode waitMode, [Values] DeleteDest deleteDest)
         {
             if (TestContext.CurrentContext.CurrentRepeatCount > 0)
                 Debug.WriteLine($"*** Current test iteration: {TestContext.CurrentContext.CurrentRepeatCount + 1} ***");
@@ -1397,10 +1358,10 @@ namespace Tsavorite.test.Revivification
             FreeRecordPool<SpanByte, SpanByte> pool = store.RevivificationManager.FreeRecordPool;
 
             Span<byte> keyVec = stackalloc byte[KeyLength];
-            var key = SpanByte.FromFixedSpan(keyVec);
+            var key = SpanByte.FromPinnedSpan(keyVec);
 
             Span<byte> inputVec = stackalloc byte[InitialLength];
-            var input = SpanByte.FromFixedSpan(inputVec);
+            var input = SpanByte.FromPinnedSpan(inputVec);
 
             // "sizeof(int) +" because SpanByte has an int length prefix.
             var recordSize = RecordInfo.GetLength() + RoundUp(sizeof(int) + keyVec.Length, 8) + RoundUp(sizeof(int) + InitialLength, 8);
@@ -1418,7 +1379,7 @@ namespace Tsavorite.test.Revivification
                 inputVec.Fill((byte)ii);
 
                 functions.expectedUsedValueLengths.Enqueue(SpanByteTotalSize(InitialLength));
-                var status = session.Delete(ref key);
+                var status = bContext.Delete(ref key);
                 Assert.IsTrue(status.Found, $"{status} for key {ii}");
                 //Assert.AreEqual(ii + 1, RevivificationTestUtils.GetFreeRecordCount(store), $"mismatched free record count for key {ii}, pt 1");
             }
@@ -1443,9 +1404,9 @@ namespace Tsavorite.test.Revivification
 
                 SpanByteAndMemory output = new();
                 if (updateOp == UpdateOp.Upsert)
-                    session.Upsert(ref key, ref input, ref input, ref output);
+                    bContext.Upsert(ref key, ref input, ref input, ref output);
                 else if (updateOp == UpdateOp.RMW)
-                    session.RMW(ref key, ref input);
+                    bContext.RMW(ref key, ref input);
                 output.Memory?.Dispose();
 
                 if (deleteDest == DeleteDest.FreeList && waitMode == WaitMode.Wait && tailAddress != store.Log.TailAddress)
@@ -1472,18 +1433,16 @@ namespace Tsavorite.test.Revivification
         [Test]
         [Category(RevivificationCategory)]
         [Category(SmokeTestCategory)]
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060:Remove unused parameter", Justification = "concurrencyControlMode is used by Setup")]
-        public void LiveBinWrappingNoRevivTest([Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp, [Values(RevivificationEnabled.NoReviv)] RevivificationEnabled revivEnabled,
-                [Values(ConcurrencyControlMode.LockTable, ConcurrencyControlMode.RecordIsolation)] ConcurrencyControlMode concurrencyControlMode)
+        public void LiveBinWrappingNoRevivTest([Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp, [Values(RevivificationEnabled.NoReviv)] RevivificationEnabled revivEnabled)
         {
             // For a comparison to the reviv version above.
             Populate();
 
             Span<byte> keyVec = stackalloc byte[KeyLength];
-            var key = SpanByte.FromFixedSpan(keyVec);
+            var key = SpanByte.FromPinnedSpan(keyVec);
 
             Span<byte> inputVec = stackalloc byte[InitialLength];
-            var input = SpanByte.FromFixedSpan(inputVec);
+            var input = SpanByte.FromPinnedSpan(inputVec);
 
             for (var iter = 0; iter < 100; ++iter)
             {
@@ -1495,7 +1454,7 @@ namespace Tsavorite.test.Revivification
                     inputVec.Fill((byte)ii);
 
                     functions.expectedUsedValueLengths.Enqueue(SpanByteTotalSize(iter == 0 ? InitialLength : InitialLength));
-                    var status = session.Delete(ref key);
+                    var status = bContext.Delete(ref key);
                     Assert.IsTrue(status.Found, $"{status} for key {ii}, iter {iter}");
                 }
 
@@ -1508,9 +1467,9 @@ namespace Tsavorite.test.Revivification
 
                     SpanByteAndMemory output = new();
                     if (updateOp == UpdateOp.Upsert)
-                        session.Upsert(ref key, ref input, ref input, ref output);
+                        bContext.Upsert(ref key, ref input, ref input, ref output);
                     else if (updateOp == UpdateOp.RMW)
-                        session.RMW(ref key, ref input);
+                        bContext.RMW(ref key, ref input);
                     output.Memory?.Dispose();
                 }
             }
@@ -1519,9 +1478,7 @@ namespace Tsavorite.test.Revivification
         [Test]
         [Category(RevivificationCategory)]
         [Category(SmokeTestCategory)]
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060:Remove unused parameter", Justification = "concurrencyControlMode is used by Setup")]
-        public void SimpleOversizeRevivifyTest([Values] DeleteDest deleteDest, [Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp,
-                [Values(ConcurrencyControlMode.LockTable, ConcurrencyControlMode.RecordIsolation)] ConcurrencyControlMode concurrencyControlMode)
+        public void SimpleOversizeRevivifyTest([Values] DeleteDest deleteDest, [Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp)
         {
             Populate();
 
@@ -1533,10 +1490,10 @@ namespace Tsavorite.test.Revivification
 
             byte chainKey = numRecords + 1;
             Span<byte> keyVec = stackalloc byte[KeyLength];
-            var key = SpanByte.FromFixedSpan(keyVec);
+            var key = SpanByte.FromPinnedSpan(keyVec);
 
             Span<byte> inputVec = stackalloc byte[OversizeLength];
-            var input = SpanByte.FromFixedSpan(inputVec);
+            var input = SpanByte.FromPinnedSpan(inputVec);
 
             SpanByteAndMemory output = new();
 
@@ -1552,13 +1509,13 @@ namespace Tsavorite.test.Revivification
 
             // Initial insert of the oversize record
             if (updateOp == UpdateOp.Upsert)
-                session.Upsert(ref key, ref input, ref input, ref output);
+                bContext.Upsert(ref key, ref input, ref input, ref output);
             else if (updateOp == UpdateOp.RMW)
-                session.RMW(ref key, ref input);
+                bContext.RMW(ref key, ref input);
 
             // Delete it
             functions.expectedUsedValueLengths.Enqueue(SpanByteTotalSize(OversizeLength));
-            var status = session.Delete(ref key);
+            var status = bContext.Delete(ref key);
             Assert.IsTrue(status.Found, status.ToString());
             if (!stayInChain)
                 RevivificationTestUtils.WaitForRecords(store, want: true);
@@ -1568,9 +1525,9 @@ namespace Tsavorite.test.Revivification
             // Revivify in the chain. Because this is oversize, the expectedFullValueLength remains the same
             functions.expectedUsedValueLengths.Enqueue(SpanByteTotalSize(OversizeLength));
             if (updateOp == UpdateOp.Upsert)
-                session.Upsert(ref key, ref input, ref input, ref output);
+                bContext.Upsert(ref key, ref input, ref input, ref output);
             else if (updateOp == UpdateOp.RMW)
-                session.RMW(ref key, ref input);
+                bContext.RMW(ref key, ref input);
 
             Assert.AreEqual(tailAddress, store.Log.TailAddress);
         }
@@ -1580,9 +1537,7 @@ namespace Tsavorite.test.Revivification
         [Test]
         [Category(RevivificationCategory)]
         [Category(SmokeTestCategory)]
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060:Remove unused parameter", Justification = "concurrencyControlMode is used by Setup")]
-        public void SimplePendingOpsRevivifyTest([Values(CollisionRange.None)] CollisionRange collisionRange, [Values] PendingOp pendingOp,
-                [Values(ConcurrencyControlMode.LockTable, ConcurrencyControlMode.RecordIsolation)] ConcurrencyControlMode concurrencyControlMode)
+        public void SimplePendingOpsRevivifyTest([Values(CollisionRange.None)] CollisionRange collisionRange, [Values] PendingOp pendingOp)
         {
             byte delAboveRO = numRecords - 2;   // Will be sent to free list
             byte targetRO = numRecords / 2 - 15;
@@ -1602,12 +1557,12 @@ namespace Tsavorite.test.Revivification
 
             // Use a different key below RO than we deleted; this will go pending to retrieve it
             Span<byte> keyVec = stackalloc byte[KeyLength];
-            var key = SpanByte.FromFixedSpan(keyVec);
+            var key = SpanByte.FromPinnedSpan(keyVec);
 
             if (pendingOp == PendingOp.Read)
             {
                 Span<byte> inputVec = stackalloc byte[InitialLength];
-                var input = SpanByte.FromFixedSpan(inputVec);
+                var input = SpanByte.FromPinnedSpan(inputVec);
 
                 keyVec.Fill(targetRO);
                 inputVec.Fill(targetRO);
@@ -1617,26 +1572,26 @@ namespace Tsavorite.test.Revivification
                 functions.expectedConcurrentDestLength = InitialLength;
 
                 var spanSlice = inputVec[..InitialLength];
-                var inputSlice = SpanByte.FromFixedSpan(spanSlice);
+                var inputSlice = SpanByte.FromPinnedSpan(spanSlice);
 
                 functions.expectedUsedValueLengths.Enqueue(SpanByteTotalSize(InitialLength));
-                var status = session.Read(ref key, ref inputSlice, ref output);
+                var status = bContext.Read(ref key, ref inputSlice, ref output);
                 Assert.IsTrue(status.IsPending, status.ToString());
-                session.CompletePending(wait: true);
+                bContext.CompletePending(wait: true);
                 Assert.IsTrue(functions.readCcCalled);
             }
             else if (pendingOp == PendingOp.RMW)
             {
                 Span<byte> inputVec = stackalloc byte[InitialLength];
-                var input = SpanByte.FromFixedSpan(inputVec);
+                var input = SpanByte.FromPinnedSpan(inputVec);
 
                 keyVec.Fill(targetRO);
                 inputVec.Fill(targetRO);
 
                 functions.expectedUsedValueLengths.Enqueue(SpanByteTotalSize(InitialLength));
 
-                session.RMW(ref key, ref input);
-                session.CompletePending(wait: true);
+                bContext.RMW(ref key, ref input);
+                bContext.CompletePending(wait: true);
                 Assert.IsTrue(functions.rmwCcCalled);
             }
             Assert.AreEqual(tailAddress, store.Log.TailAddress);
@@ -1652,6 +1607,7 @@ namespace Tsavorite.test.Revivification
         private MyFunctions functions;
         private TsavoriteKV<MyKey, MyValue> store;
         private ClientSession<MyKey, MyValue, MyInput, MyOutput, Empty, MyFunctions> session;
+        private BasicContext<MyKey, MyValue, MyInput, MyOutput, Empty, MyFunctions> bContext;
         private IDevice log;
         private IDevice objlog;
 
@@ -1662,24 +1618,15 @@ namespace Tsavorite.test.Revivification
             log = Devices.CreateLogDevice(Path.Combine(MethodTestDir, "test.log"), deleteOnClose: true);
             objlog = Devices.CreateLogDevice(Path.Combine(MethodTestDir, "test.obj.log"), deleteOnClose: true);
 
-            var concurrencyControlMode = ConcurrencyControlMode.LockTable;
-            foreach (var arg in TestContext.CurrentContext.Test.Arguments)
-            {
-                if (arg is ConcurrencyControlMode ccm)
-                {
-                    concurrencyControlMode = ccm;
-                    continue;
-                }
-            }
-
             store = new TsavoriteKV<MyKey, MyValue>
                 (128,
                 logSettings: new LogSettings { LogDevice = log, ObjectLogDevice = objlog, MutableFraction = 0.1, MemorySizeBits = 22, PageSizeBits = 12 },
                 serializerSettings: new SerializerSettings<MyKey, MyValue> { keySerializer = () => new MyKeySerializer(), valueSerializer = () => new MyValueSerializer() },
-                concurrencyControlMode: concurrencyControlMode, revivificationSettings: RevivificationSettings.DefaultFixedLength);
+                revivificationSettings: RevivificationSettings.DefaultFixedLength);
 
             functions = new MyFunctions();
             session = store.NewSession<MyInput, MyOutput, Empty, MyFunctions>(functions);
+            bContext = session.BasicContext;
         }
 
         [TearDown]
@@ -1703,7 +1650,7 @@ namespace Tsavorite.test.Revivification
             {
                 var keyObj = new MyKey { key = key };
                 var valueObj = new MyValue { value = key + valueMult };
-                var status = session.Upsert(keyObj, valueObj);
+                var status = bContext.Upsert(keyObj, valueObj);
                 Assert.IsTrue(status.Record.Created, status.ToString());
             }
         }
@@ -1711,15 +1658,13 @@ namespace Tsavorite.test.Revivification
         [Test]
         [Category(RevivificationCategory)]
         [Category(SmokeTestCategory)]
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060:Remove unused parameter", Justification = "concurrencyControlMode is used by Setup")]
-        public void SimpleObjectTest([Values] DeleteDest deleteDest, [Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp,
-                [Values(ConcurrencyControlMode.LockTable, ConcurrencyControlMode.RecordIsolation)] ConcurrencyControlMode concurrencyControlMode)
+        public void SimpleObjectTest([Values] DeleteDest deleteDest, [Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp)
         {
             Populate();
 
             var deleteKey = RevivificationTestUtils.GetMinRevivifiableKey(store, numRecords);
             var tailAddress = store.Log.TailAddress;
-            session.Delete(new MyKey { key = deleteKey });
+            bContext.Delete(new MyKey { key = deleteKey });
             Assert.AreEqual(tailAddress, store.Log.TailAddress);
 
             var updateKey = deleteDest == DeleteDest.InChain ? deleteKey : numRecords + 1;
@@ -1732,9 +1677,9 @@ namespace Tsavorite.test.Revivification
             Assert.IsTrue(RevivificationTestUtils.HasRecords(store.RevivificationManager.FreeRecordPool), "Expected a free record after delete and WaitForRecords");
 
             if (updateOp == UpdateOp.Upsert)
-                session.Upsert(key, value);
+                bContext.Upsert(key, value);
             else if (updateOp == UpdateOp.RMW)
-                session.RMW(key, input);
+                bContext.RMW(key, input);
 
             RevivificationTestUtils.WaitForRecords(store, want: false);
             Assert.AreEqual(tailAddress, store.Log.TailAddress, "Expected tail address not to grow (record was revivified)");
@@ -1775,7 +1720,7 @@ namespace Tsavorite.test.Revivification
                     var compareLength = Math.Min(functionsKey.Length, valueLengthRemaining);
                     Span<byte> valueSpan = functionsValue.AsSpan().Slice(valueOffset, compareLength);
                     Span<byte> keySpan = functionsKey.AsSpan()[..compareLength];
-                    Assert.IsTrue(valueSpan.SequenceEqual(keySpan), $"functionsValue (offset {valueOffset}, len {compareLength}: {SpanByte.FromFixedSpan(valueSpan)}) does not match functionsKey ({SpanByte.FromFixedSpan(keySpan)})");
+                    Assert.IsTrue(valueSpan.SequenceEqual(keySpan), $"functionsValue (offset {valueOffset}, len {compareLength}: {SpanByte.FromPinnedSpan(valueSpan)}) does not match functionsKey ({SpanByte.FromPinnedSpan(keySpan)})");
                     valueOffset += compareLength;
                     valueLengthRemaining -= compareLength;
                 }
@@ -1826,6 +1771,7 @@ namespace Tsavorite.test.Revivification
 
         private TsavoriteKV<SpanByte, SpanByte> store;
         private ClientSession<SpanByte, SpanByte, SpanByte, SpanByteAndMemory, Empty, RevivificationStressFunctions> session;
+        private BasicContext<SpanByte, SpanByte, SpanByte, SpanByteAndMemory, Empty, RevivificationStressFunctions> bContext;
         private IDevice log;
 
         [SetUp]
@@ -1836,7 +1782,6 @@ namespace Tsavorite.test.Revivification
 
             CollisionRange collisionRange = CollisionRange.None;
             LogSettings logSettings = new() { LogDevice = log, ObjectLogDevice = null, PageSizeBits = 17, MemorySizeBits = 20 };
-            var concurrencyControlMode = ConcurrencyControlMode.LockTable;
             foreach (var arg in TestContext.CurrentContext.Test.Arguments)
             {
                 if (arg is CollisionRange cr)
@@ -1844,18 +1789,14 @@ namespace Tsavorite.test.Revivification
                     collisionRange = cr;
                     continue;
                 }
-                if (arg is ConcurrencyControlMode ccm)
-                {
-                    concurrencyControlMode = ccm;
-                    continue;
-                }
             }
 
             comparer = new RevivificationSpanByteComparer(collisionRange);
-            store = new TsavoriteKV<SpanByte, SpanByte>(1L << 16, logSettings, comparer: comparer, concurrencyControlMode: concurrencyControlMode, revivificationSettings: RevivificationSettings.PowerOf2Bins);
+            store = new TsavoriteKV<SpanByte, SpanByte>(1L << 16, logSettings, comparer: comparer, revivificationSettings: RevivificationSettings.PowerOf2Bins);
 
             functions = new RevivificationStressFunctions(keyComparer: null);
             session = store.NewSession<SpanByte, SpanByteAndMemory, Empty, RevivificationStressFunctions>(functions);
+            bContext = session.BasicContext;
         }
 
         [TearDown]
@@ -1874,10 +1815,10 @@ namespace Tsavorite.test.Revivification
         unsafe void Populate()
         {
             Span<byte> keyVec = stackalloc byte[KeyLength];
-            var key = SpanByte.FromFixedSpan(keyVec);
+            var key = SpanByte.FromPinnedSpan(keyVec);
 
             Span<byte> inputVec = stackalloc byte[InitialLength];
-            var input = SpanByte.FromFixedSpan(inputVec);
+            var input = SpanByte.FromPinnedSpan(inputVec);
 
             SpanByteAndMemory output = new();
 
@@ -1886,7 +1827,7 @@ namespace Tsavorite.test.Revivification
                 keyVec.Fill((byte)ii);
                 inputVec.Fill((byte)ii);
 
-                var status = session.Upsert(ref key, ref input, ref input, ref output);
+                var status = bContext.Upsert(ref key, ref input, ref input, ref output);
                 Assert.IsTrue(status.Record.Created, status.ToString());
             }
         }
@@ -2209,9 +2150,7 @@ namespace Tsavorite.test.Revivification
         [Test]
         [Category(RevivificationCategory)]
         //[Repeat(3000)]
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060:Remove unused parameter", Justification = "concurrencyControlMode is used by Setup")]
-        public void LiveThreadContentionOnOneRecordTest([Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp,
-                [Values(ConcurrencyControlMode.LockTable, ConcurrencyControlMode.RecordIsolation)] ConcurrencyControlMode concurrencyControlMode)
+        public void LiveThreadContentionOnOneRecordTest([Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp)
         {
             if (TestContext.CurrentContext.CurrentRepeatCount > 0)
                 Debug.WriteLine($"*** Current test iteration: {TestContext.CurrentContext.CurrentRepeatCount + 1} ***");
@@ -2225,9 +2164,10 @@ namespace Tsavorite.test.Revivification
                 Random rng = new(tid * 101);
 
                 using var localSession = store.NewSession<SpanByte, SpanByteAndMemory, Empty, RevivificationStressFunctions>(new RevivificationStressFunctions(keyComparer: null));
+                var localbContext = localSession.BasicContext;
 
                 Span<byte> keyVec = stackalloc byte[KeyLength];
-                var key = SpanByte.FromFixedSpan(keyVec);
+                var key = SpanByte.FromPinnedSpan(keyVec);
 
                 for (var iteration = 0; iteration < numIterations; ++iteration)
                 {
@@ -2235,7 +2175,7 @@ namespace Tsavorite.test.Revivification
                     {
                         var kk = rng.Next(keyRange);
                         keyVec.Fill((byte)kk);
-                        localSession.Delete(key);
+                        localbContext.Delete(key);
                     }
                 }
             }
@@ -2243,15 +2183,16 @@ namespace Tsavorite.test.Revivification
             unsafe void runUpdateThread(int tid)
             {
                 Span<byte> keyVec = stackalloc byte[KeyLength];
-                var key = SpanByte.FromFixedSpan(keyVec);
+                var key = SpanByte.FromPinnedSpan(keyVec);
 
                 Span<byte> inputVec = stackalloc byte[InitialLength];
-                var input = SpanByte.FromFixedSpan(inputVec);
+                var input = SpanByte.FromPinnedSpan(inputVec);
 
                 Random rng = new(tid * 101);
 
                 RevivificationStressFunctions localFunctions = new(keyComparer: store.comparer);
                 using var localSession = store.NewSession<SpanByte, SpanByteAndMemory, Empty, RevivificationStressFunctions>(localFunctions);
+                var localbContext = localSession.BasicContext;
 
                 for (var iteration = 0; iteration < numIterations; ++iteration)
                 {
@@ -2263,15 +2204,15 @@ namespace Tsavorite.test.Revivification
 
                         localSession.functions.expectedKey = key;
                         if (updateOp == UpdateOp.Upsert)
-                            localSession.Upsert(key, input);
+                            localbContext.Upsert(key, input);
                         else
-                            localSession.RMW(key, input);
+                            localbContext.RMW(key, input);
                         localSession.functions.expectedKey = default;
                     }
 
                     // Clear keyComparer so it does not try to validate during CompletePending (when it doesn't have an expectedKey)
                     localFunctions.keyComparer = null;
-                    localSession.CompletePending(wait: true);
+                    localbContext.CompletePending(wait: true);
                     localFunctions.keyComparer = store.comparer;
                 }
             }
@@ -2295,10 +2236,8 @@ namespace Tsavorite.test.Revivification
         [Test]
         [Category(RevivificationCategory)]
         //[Repeat(3000)]
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060:Remove unused parameter", Justification = "concurrencyControlMode is used by Setup")]
         public void LiveFreeListThreadStressTest([Values] CollisionRange collisionRange,
-                                             [Values] ThreadingPattern threadingPattern, [Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp,
-                                             [Values(ConcurrencyControlMode.LockTable, ConcurrencyControlMode.RecordIsolation)] ConcurrencyControlMode concurrencyControlMode)
+                                             [Values] ThreadingPattern threadingPattern, [Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp)
         {
             if (TestContext.CurrentContext.CurrentRepeatCount > 0)
                 Debug.WriteLine($"*** Current test iteration: {TestContext.CurrentContext.CurrentRepeatCount + 1} ***");
@@ -2311,9 +2250,10 @@ namespace Tsavorite.test.Revivification
                 Random rng = new(tid * 101);
 
                 using var localSession = store.NewSession<SpanByte, SpanByteAndMemory, Empty, RevivificationStressFunctions>(new RevivificationStressFunctions(keyComparer: null));
+                var localbContext = localSession.BasicContext;
 
                 Span<byte> keyVec = stackalloc byte[KeyLength];
-                var key = SpanByte.FromFixedSpan(keyVec);
+                var key = SpanByte.FromPinnedSpan(keyVec);
 
                 for (var iteration = 0; iteration < numIterations; ++iteration)
                 {
@@ -2321,7 +2261,7 @@ namespace Tsavorite.test.Revivification
                     {
                         var kk = threadingPattern == ThreadingPattern.RandomKeys ? rng.Next(numRecords) : ii;
                         keyVec.Fill((byte)kk);
-                        localSession.Delete(key);
+                        localbContext.Delete(key);
                     }
                 }
             }
@@ -2329,15 +2269,16 @@ namespace Tsavorite.test.Revivification
             unsafe void runUpdateThread(int tid)
             {
                 Span<byte> keyVec = stackalloc byte[KeyLength];
-                var key = SpanByte.FromFixedSpan(keyVec);
+                var key = SpanByte.FromPinnedSpan(keyVec);
 
                 Span<byte> inputVec = stackalloc byte[InitialLength];
-                var input = SpanByte.FromFixedSpan(inputVec);
+                var input = SpanByte.FromPinnedSpan(inputVec);
 
                 Random rng = new(tid * 101);
 
                 RevivificationStressFunctions localFunctions = new(keyComparer: store.comparer);
                 using var localSession = store.NewSession<SpanByte, SpanByteAndMemory, Empty, RevivificationStressFunctions>(localFunctions);
+                var localbContext = localSession.BasicContext;
 
                 for (var iteration = 0; iteration < numIterations; ++iteration)
                 {
@@ -2349,15 +2290,15 @@ namespace Tsavorite.test.Revivification
 
                         localSession.functions.expectedKey = key;
                         if (updateOp == UpdateOp.Upsert)
-                            localSession.Upsert(key, input);
+                            localbContext.Upsert(key, input);
                         else
-                            localSession.RMW(key, input);
+                            localbContext.RMW(key, input);
                         localSession.functions.expectedKey = default;
                     }
 
                     // Clear keyComparer so it does not try to validate during CompletePending (when it doesn't have an expectedKey)
                     localFunctions.keyComparer = null;
-                    localSession.CompletePending(wait: true);
+                    localbContext.CompletePending(wait: true);
                     localFunctions.keyComparer = store.comparer;
                 }
             }
@@ -2379,10 +2320,7 @@ namespace Tsavorite.test.Revivification
         [Test]
         [Category(RevivificationCategory)]
         //[Repeat(30)]
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060:Remove unused parameter", Justification = "concurrencyControlMode is used by Setup")]
-        public void LiveInChainThreadStressTest([Values(CollisionRange.Ten)] CollisionRange collisionRange,
-                                                [Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp,
-                                                [Values(ConcurrencyControlMode.LockTable, ConcurrencyControlMode.RecordIsolation)] ConcurrencyControlMode concurrencyControlMode)
+        public void LiveInChainThreadStressTest([Values(CollisionRange.Ten)] CollisionRange collisionRange, [Values(UpdateOp.Upsert, UpdateOp.RMW)] UpdateOp updateOp)
         {
             if (TestContext.CurrentContext.CurrentRepeatCount > 0)
                 Debug.WriteLine($"*** Current test iteration: {TestContext.CurrentContext.CurrentRepeatCount + 1} ***");
@@ -2396,16 +2334,17 @@ namespace Tsavorite.test.Revivification
             unsafe void runDeleteThread(int tid)
             {
                 using var localSession = store.NewSession<SpanByte, SpanByteAndMemory, Empty, RevivificationStressFunctions>(new RevivificationStressFunctions(keyComparer: null));
+                var localbContext = localSession.BasicContext;
 
                 Span<byte> keyVec = stackalloc byte[KeyLength];
-                var key = SpanByte.FromFixedSpan(keyVec);
+                var key = SpanByte.FromPinnedSpan(keyVec);
 
                 for (var iteration = 0; iteration < numIterations; ++iteration)
                 {
                     for (var ii = tid; ii < numRecords; ii += numDeleteThreads)
                     {
                         keyVec.Fill((byte)ii);
-                        localSession.Delete(key);
+                        localbContext.Delete(key);
                     }
                 }
             }
@@ -2413,13 +2352,14 @@ namespace Tsavorite.test.Revivification
             unsafe void runUpdateThread(int tid)
             {
                 Span<byte> keyVec = stackalloc byte[KeyLength];
-                var key = SpanByte.FromFixedSpan(keyVec);
+                var key = SpanByte.FromPinnedSpan(keyVec);
 
                 Span<byte> inputVec = stackalloc byte[InitialLength];
-                var input = SpanByte.FromFixedSpan(inputVec);
+                var input = SpanByte.FromPinnedSpan(inputVec);
 
                 RevivificationStressFunctions localFunctions = new RevivificationStressFunctions(keyComparer: null);
                 using var localSession = store.NewSession<SpanByte, SpanByteAndMemory, Empty, RevivificationStressFunctions>(localFunctions);
+                var localbContext = localSession.BasicContext;
 
                 for (var iteration = 0; iteration < numIterations; ++iteration)
                 {
@@ -2430,15 +2370,15 @@ namespace Tsavorite.test.Revivification
 
                         localSession.functions.expectedKey = key;
                         if (updateOp == UpdateOp.Upsert)
-                            localSession.Upsert(key, input);
+                            localbContext.Upsert(key, input);
                         else
-                            localSession.RMW(key, input);
+                            localbContext.RMW(key, input);
                         localSession.functions.expectedKey = default;
                     }
 
                     // Clear keyComparer so it does not try to validate during CompletePending (when it doesn't have an expectedKey)
                     localFunctions.keyComparer = null;
-                    localSession.CompletePending(wait: true);
+                    localbContext.CompletePending(wait: true);
                     localFunctions.keyComparer = store.comparer;
                 }
             }

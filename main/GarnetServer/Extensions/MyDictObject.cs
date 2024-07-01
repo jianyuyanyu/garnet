@@ -27,13 +27,13 @@ namespace Garnet
         public MyDict(byte type)
             : base(type, 0, MemoryUtils.DictionaryOverhead)
         {
-            dict = new(new ByteArrayComparer());
+            dict = new(ByteArrayComparer.Instance);
         }
 
         public MyDict(byte type, BinaryReader reader)
             : base(type, reader, MemoryUtils.DictionaryOverhead)
         {
-            dict = new(new ByteArrayComparer());
+            dict = new(ByteArrayComparer.Instance);
 
             int count = reader.ReadInt32();
             for (int i = 0; i < count; i++)
@@ -66,7 +66,7 @@ namespace Garnet
             }
         }
 
-        public override void Operate(byte subCommand, ReadOnlySpan<byte> input, ref (IMemoryOwner<byte>, int) output)
+        public override void Operate(byte subCommand, ReadOnlySpan<byte> input, ref (IMemoryOwner<byte>, int) output, out bool removeKey)
         {
             switch (subCommand)
             {
@@ -78,7 +78,8 @@ namespace Garnet
 
                         dict[key] = value;
                         UpdateSize(key, value);
-                        break; // +OK is sent as response, by default
+                        WriteSimpleString(ref output, "OK");
+                        break;
                     }
                 case 1: // MYDICTGET
                     {
@@ -93,6 +94,8 @@ namespace Garnet
                     WriteError(ref output, "Unexpected command");
                     break;
             }
+
+            removeKey = dict.Count == 0;
         }
 
         public override void Dispose() { }

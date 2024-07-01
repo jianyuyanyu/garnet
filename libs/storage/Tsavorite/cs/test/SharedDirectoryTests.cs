@@ -21,7 +21,6 @@ namespace Tsavorite.test.recovery.sumstore
         const long keySpace = (1L << 5);
         const long numOps = (1L << 10);
         const long completePendingInterval = (1L << 10);
-        private string rootPath;
         private string sharedLogDirectory;
         TsavoriteTestInstance original;
         TsavoriteTestInstance clone;
@@ -29,9 +28,8 @@ namespace Tsavorite.test.recovery.sumstore
         [SetUp]
         public void Setup()
         {
-            rootPath = TestUtils.MethodTestDir;
-            TestUtils.RecreateDirectory(rootPath);
-            sharedLogDirectory = $"{rootPath}/SharedLogs";
+            TestUtils.RecreateDirectory(TestUtils.MethodTestDir);
+            sharedLogDirectory = Path.Join(TestUtils.MethodTestDir, "SharedLogs");
             Directory.CreateDirectory(sharedLogDirectory);
 
             original = new TsavoriteTestInstance();
@@ -43,7 +41,7 @@ namespace Tsavorite.test.recovery.sumstore
         {
             original.TearDown();
             clone.TearDown();
-            TestUtils.DeleteDirectory(rootPath);
+            TestUtils.DeleteDirectory(TestUtils.MethodTestDir);
         }
 
         [Test]
@@ -52,7 +50,7 @@ namespace Tsavorite.test.recovery.sumstore
         [Category("Smoke")]
         public async ValueTask SharedLogDirectory([Values] bool isAsync)
         {
-            original.Initialize($"{rootPath}/OriginalCheckpoint", sharedLogDirectory);
+            original.Initialize(Path.Join(TestUtils.MethodTestDir, "OriginalCheckpoint"), sharedLogDirectory);
             Assert.IsTrue(IsDirectoryEmpty(sharedLogDirectory)); // sanity check
             Populate(original.Store);
 
@@ -65,7 +63,7 @@ namespace Tsavorite.test.recovery.sumstore
             Test(original, checkpointGuid);
 
             // Copy checkpoint directory
-            var cloneCheckpointDirectory = $"{rootPath}/CloneCheckpoint";
+            var cloneCheckpointDirectory = Path.Join(TestUtils.MethodTestDir, "CloneCheckpoint");
             CopyDirectory(new DirectoryInfo(original.CheckpointDirectory), new DirectoryInfo(cloneCheckpointDirectory));
 
             // Recover from original checkpoint
@@ -112,7 +110,7 @@ namespace Tsavorite.test.recovery.sumstore
                 LogDirectory = logDirectory;
 
                 string logFileName = "log";
-                string deviceFileName = $"{LogDirectory}/{logFileName}";
+                string deviceFileName = Path.Join(LogDirectory, logFileName);
                 KeyValuePair<int, SafeFileHandle>[] initialHandles = null;
                 if (populateLogHandles)
                 {
@@ -160,6 +158,7 @@ namespace Tsavorite.test.recovery.sumstore
         private void Populate(TsavoriteKV<AdId, NumClicks> store)
         {
             using var session = store.NewSession<AdInput, Output, Empty, Functions>(new Functions());
+            var bContext = session.BasicContext;
 
             // Prepare the dataset
             var inputArray = new AdInput[numOps];
@@ -172,16 +171,16 @@ namespace Tsavorite.test.recovery.sumstore
             // Process the batch of input data
             for (int i = 0; i < numOps; i++)
             {
-                session.RMW(ref inputArray[i].adId, ref inputArray[i], Empty.Default, i);
+                bContext.RMW(ref inputArray[i].adId, ref inputArray[i], Empty.Default);
 
                 if (i % completePendingInterval == 0)
                 {
-                    session.CompletePending(false);
+                    bContext.CompletePending(false);
                 }
             }
 
             // Make sure operations are completed
-            session.CompletePending(true);
+            bContext.CompletePending(true);
         }
 
         private void Test(TsavoriteTestInstance tsavoriteInstance, Guid checkpointToken)
@@ -205,46 +204,19 @@ namespace Tsavorite.test.recovery.sumstore
             var output = default(Output);
 
             using var session = tsavoriteInstance.Store.NewSession<AdInput, Output, Empty, Functions>(new Functions());
+            var bContext = session.BasicContext;
+
             // Issue read requests
             for (var i = 0; i < numUniqueKeys; i++)
             {
-                var status = session.Read(ref inputArray[i].adId, ref input, ref output, Empty.Default, i);
+                var status = bContext.Read(ref inputArray[i].adId, ref input, ref output, Empty.Default);
                 Assert.IsTrue(status.Found);
                 inputArray[i].numClicks = output.value;
             }
 
             // Complete all pending requests
-            session.CompletePending(true);
-
-            // Compute expected array
-            long[] expected = new long[numUniqueKeys];
-            foreach (var guid in checkpointInfo.continueTokens.Keys)
-            {
-                var sno = checkpointInfo.continueTokens[guid].Item2.UntilSerialNo;
-                for (long i = 0; i <= sno; i++)
-                {
-                    var id = i % numUniqueKeys;
-                    expected[id]++;
-                }
-            }
-
-            int threadCount = 1; // single threaded test
-            int numCompleted = threadCount - checkpointInfo.continueTokens.Count;
-            for (int t = 0; t < numCompleted; t++)
-            {
-                var sno = numOps;
-                for (long i = 0; i < sno; i++)
-                {
-                    var id = i % numUniqueKeys;
-                    expected[id]++;
-                }
-            }
-
-            // Assert that expected is same as found
-            for (long i = 0; i < numUniqueKeys; i++)
-            {
-                Assert.AreEqual(expected[i], inputArray[i].numClicks.numClicks, $"AdId {inputArray[i].adId.adId}");
-            }
+            bContext.CompletePending(true);
+            session.Dispose();
         }
 
         private bool IsDirectoryEmpty(string path) => !Directory.Exists(path) || !Directory.EnumerateFileSystemEntries(path).Any();

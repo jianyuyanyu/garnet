@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading.Tasks;
 using NUnit.Framework;
 using Tsavorite.core;
@@ -15,7 +16,6 @@ namespace Tsavorite.test
     {
         private TsavoriteKV<SpanByte, SpanByte> store;
         private IDevice log;
-        private string path;
 
         // Note: We always set value.length to 2, which includes both VLValue members; we are not exercising the "Variable Length" aspect here.
         private const int ValueLength = 2;
@@ -23,10 +23,8 @@ namespace Tsavorite.test
         [SetUp]
         public void Setup()
         {
-            path = MethodTestDir + "/";
-
             // Clean up log files from previous test runs in case they weren't cleaned up
-            DeleteDirectory(path, wait: true);
+            DeleteDirectory(TestUtils.MethodTestDir, wait: true);
         }
 
         [TearDown]
@@ -36,7 +34,7 @@ namespace Tsavorite.test
             store = null;
             log?.Dispose();
             log = null;
-            DeleteDirectory(path);
+            DeleteDirectory(TestUtils.MethodTestDir);
         }
 
         internal struct SpanBytePushIterationTestFunctions : IScanIteratorFunctions<SpanByte, SpanByte>
@@ -70,12 +68,13 @@ namespace Tsavorite.test
         [Category(SmokeTestCategory)]
         public unsafe void SpanByteIterationBasicTest([Values] DeviceType deviceType, [Values] ScanIteratorType scanIteratorType)
         {
-            log = CreateTestDevice(deviceType, $"{path}{deviceType}.log");
+            log = CreateTestDevice(deviceType, $"{MethodTestDir}{deviceType}.log");
             store = new TsavoriteKV<SpanByte, SpanByte>
-                 (1L << 20, new LogSettings { LogDevice = log, MemorySizeBits = 15, PageSizeBits = 9, SegmentSizeBits = 22 },
-                 concurrencyControlMode: scanIteratorType == ScanIteratorType.Pull ? ConcurrencyControlMode.None : ConcurrencyControlMode.LockTable);
+                 (1L << 20, new LogSettings { LogDevice = log, MemorySizeBits = 15, PageSizeBits = 9, SegmentSizeBits = 22 });
 
             using var session = store.NewSession<SpanByte, int[], Empty, VLVectorFunctions>(new VLVectorFunctions());
+            var bContext = session.BasicContext;
+
             SpanBytePushIterationTestFunctions scanIteratorFunctions = new();
 
             const int totalRecords = 500;
@@ -108,7 +107,7 @@ namespace Tsavorite.test
             {
                 keySpan[0] = i;
                 valueSpan[0] = i;
-                session.Upsert(ref key, ref value);
+                bContext.Upsert(ref key, ref value);
             }
             iterateAndVerify(1, totalRecords);
 
@@ -116,7 +115,7 @@ namespace Tsavorite.test
             {
                 keySpan[0] = i;
                 valueSpan[0] = i * 2;
-                session.Upsert(ref key, ref value);
+                bContext.Upsert(ref key, ref value);
             }
             iterateAndVerify(2, totalRecords);
 
@@ -124,7 +123,7 @@ namespace Tsavorite.test
             {
                 keySpan[0] = i;
                 valueSpan[0] = i;
-                session.Upsert(ref key, ref value);
+                bContext.Upsert(ref key, ref value);
             }
             iterateAndVerify(0, totalRecords);
 
@@ -132,14 +131,14 @@ namespace Tsavorite.test
             {
                 keySpan[0] = i;
                 valueSpan[0] = i;
-                session.Upsert(ref key, ref value);
+                bContext.Upsert(ref key, ref value);
             }
             iterateAndVerify(0, totalRecords);
 
             for (int i = 0; i < totalRecords; i += 2)
             {
                 keySpan[0] = i;
-                session.Delete(ref key);
+                bContext.Delete(ref key);
             }
             iterateAndVerify(0, totalRecords / 2);
 
@@ -147,7 +146,7 @@ namespace Tsavorite.test
             {
                 keySpan[0] = i;
                 valueSpan[0] = i * 3;
-                session.Upsert(ref key, ref value);
+                bContext.Upsert(ref key, ref value);
             }
             iterateAndVerify(3, totalRecords);
 
@@ -160,11 +159,12 @@ namespace Tsavorite.test
         [Category(SmokeTestCategory)]
         public void SpanByteIterationPushStopTest([Values] DeviceType deviceType)
         {
-            log = CreateTestDevice(deviceType, $"{path}{deviceType}.log");
+            log = CreateTestDevice(deviceType, Path.Join(MethodTestDir, $"{deviceType}.log"));
             store = new TsavoriteKV<SpanByte, SpanByte>
                  (1L << 20, new LogSettings { LogDevice = log, MemorySizeBits = 15, PageSizeBits = 9, SegmentSizeBits = 22 });
 
             using var session = store.NewSession<SpanByte, int[], Empty, VLVectorFunctions>(new VLVectorFunctions());
+            var bContext = session.BasicContext;
             SpanBytePushIterationTestFunctions scanIteratorFunctions = new();
 
             const int totalRecords = 2000;
@@ -192,7 +192,7 @@ namespace Tsavorite.test
             {
                 keySpan[0] = i;
                 valueSpan[0] = i;
-                session.Upsert(ref key, ref value);
+                bContext.Upsert(ref key, ref value);
             }
 
             scanAndVerify(42, useScan: true);
@@ -204,7 +204,7 @@ namespace Tsavorite.test
         [Category(SmokeTestCategory)]
         public unsafe void SpanByteIterationPushLockTest([Values(1, 4)] int scanThreads, [Values(1, 4)] int updateThreads, [Values] ScanMode scanMode)
         {
-            log = Devices.CreateLogDevice($"{path}lock_test.log");
+            log = Devices.CreateLogDevice(Path.Join(MethodTestDir, "lock_test.log"));
             // Must be large enough to contain all records in memory to exercise locking
             store = new TsavoriteKV<SpanByte, SpanByte>
                  (1L << 20, new LogSettings { LogDevice = log, MemorySizeBits = 25, PageSizeBits = 19, SegmentSizeBits = 22 });
@@ -232,11 +232,12 @@ namespace Tsavorite.test
                 var value = valueSpan.AsSpanByte();
 
                 using var session = store.NewSession<SpanByte, int[], Empty, VLVectorFunctions>(new VLVectorFunctions());
+                var bContext = session.BasicContext;
                 for (int i = 0; i < totalRecords; i++)
                 {
                     keySpan[0] = i;
                     valueSpan[0] = i * (tid + 1);
-                    session.Upsert(ref key, ref value);
+                    bContext.Upsert(ref key, ref value);
                 }
             }
 
@@ -249,11 +250,12 @@ namespace Tsavorite.test
                 var value = valueSpan.AsSpanByte();
 
                 using var session = store.NewSession<SpanByte, int[], Empty, VLVectorFunctions>(new VLVectorFunctions());
+                var bContext = session.BasicContext;
                 for (int i = 0; i < totalRecords; i++)
                 {
                     keySpan[0] = i;
                     valueSpan[0] = i;
-                    session.Upsert(ref key, ref value);
+                    bContext.Upsert(ref key, ref value);
                 }
             }
 

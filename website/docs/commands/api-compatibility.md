@@ -9,32 +9,45 @@ Below is the full list of API commands and their implementation status in Garnet
 Note that this list is subject to change as we continue to expand our API command support with the help of our growing community.
 
 ### Command Categories
-1. [BITMAP](#bitmap)
-2. [CLUSTER](#cluster)
-3. [CONNECTION](#connection)
-4. [FUNCTIONS](#functions)
-5. [GENERIC](#generic)
-6. [GEO](#geo)
-7. [HASH](#hash)
-8. [HYPERLOGLOG](#hyperloglog)
-9. [KEYS](#keys)
-10. [LIST](#list)
-11. [PUB/SUB](#pubsub)
-12. [SCRIPTING](#scripting)
-13. [SERVER](#server)
-14. [SET](#set)
-15. [SORTED SET](#sorted-set)
-16. [STREAM](#stream)
-17. [STRING](#string)
-18. [TRANSACTIONS](#transactions)
+1. [ACL](#acl)
+2. [BITMAP](#bitmap)
+3. [CLUSTER](#cluster)
+4. [CONNECTION](#connection)
+5. [FUNCTIONS](#functions)
+6. [GENERIC](#generic)
+7. [GEO](#geo)
+8. [HASH](#hash)
+9. [HYPERLOGLOG](#hyperloglog)
+10. [KEYS](#keys)
+11. [LIST](#list)
+12. [PUB/SUB](#pubsub)
+13. [SCRIPTING](#scripting)
+14. [SERVER](#server)
+15. [SET](#set)
+16. [SORTED SET](#sorted-set)
+17. [STREAM](#stream)
+18. [STRING](#string)
+10. [TRANSACTIONS](#transactions)
 
 ### Full Commands List
 
 | Category | Command | Implemented in Garnet | Notes |
 | ------------- | ------------- | ------------- | ------------- | 
+| <span id="acl">**ACL**</span> | [CAT](acl.md#acl-cat) | ➕ |  |
+|  | [DELUSER](acl.md#acl-deluser) | ➕ |  |
+|  | DRYRUN | ➖ |  |
+|  | GENPASS | ➖ |  |
+|  | GETUSER | ➖ |  |
+|  | [LIST](acl.md#acl-list) | ➕ |  |
+|  | [LOAD](acl.md#acl-load) | ➕ |  |
+|  | LOG | ➖ |  |
+|  | SAVE | ➖ |  |
+|  | [SETUSER](acl.md#acl-setuser) | ➕ |  |
+|  | [USERS](acl.md#acl-users) | ➕ |  |
+|  | [WHOAMI](acl.md#acl-whoami) | ➕ |  |
 | <span id="bitmap">**BITMAP**</span> | [BITCOUNT](analytics.md#bitcount) | ➕ |  |
 |  | [BITFIELD](analytics.md#bitfield) | ➕ |  |
-|  | BITFIELD_RO | ➖ |  |
+|  | [BITFIELD_RO](analytics.md#bitfield_ro) | ➕ |  |
 |  | [BITOP AND](analytics.md#bitop-and) | ➕ |  |
 |  | [BITOP NOT](analytics.md#bitop-not) | ➕ |  |
 |  | [BITPOS](analytics.md#bitpos) | ➕ |  |
@@ -71,6 +84,7 @@ Note that this list is subject to change as we continue to expand our API comman
 | <span id="connection">**CONNECTION**</span> | [AUTH](generic-commands.md#auth) | ➕ |  |
 |  | CLIENT CACHING | ➖ |  |
 |  | [ECHO](generic-commands.md#echo) | ➕ |  |
+|  | [HELLO](generic-commands.md#hello) | ➕ |  |
 |  | [PING](generic-commands.md#ping) | ➕ |  |
 |  | [QUIT](generic-commands.md#quit) | ➕ |  |
 |  | SELECT | ➕ |  |
@@ -91,18 +105,18 @@ Note that this list is subject to change as we continue to expand our API comman
 |  | SORT | ➖ |  |
 |  | SORT_RO | ➖ |  |
 |  | TOUCH | ➖ |  |
-|  | [TTL](generic-commands.md#ttl-ttl) | ➕ |  |
+|  | [TTL](generic-commands.md#ttl) | ➕ |  |
 |  | [TYPE](generic-commands.md#type) | ➕ |  |
 |  | [UNLINK](generic-commands.md#unlink) | ➕ |  |
 |  | WAIT | ➖ |  |
-| <span id="geo">**GEO**</span> | [GEOADD](data-structures.md#geoadd-geoadd) | ➕ |  |
+| <span id="geo">**GEO**</span> | [GEOADD](data-structures.md#geoadd) | ➕ |  |
 |  | [GEODIST](data-structures.md#geodist) | ➕ |  |
 |  | [GEOHASH](data-structures.md#geohash) | ➕ |  |
 |  | [GEOPOS](data-structures.md#geopos) | ➕ |  |
 |  | GEORADIUS | ➖ |  |
 |  | GEORADIUS_RO | ➖ |  |
 |  | GEORADIUSBYMEMBER | ➖ |  |
-|  | [GEOSEARCH](data-structures.md#geosearch-geosearch) | ➕ | Partially Implemented |
+|  | [GEOSEARCH](data-structures.md#geosearch) | ➕ | Partially Implemented |
 |  | GEOSEARCHSTORE | ➖ |  |
 | <span id="hash">**HASH**</span> | [HDEL](data-structures.md#hdel) | ➕ |  |
 |  | [HEXISTS](data-structures.md#hexists) | ➕ |  |
@@ -118,7 +132,7 @@ Note that this list is subject to change as we continue to expand our API comman
 |  | [HSCAN](data-structures.md#hscan) | ➕ |  |
 |  | [HSET](data-structures.md#hset) | ➕ |  |
 |  | [HSETNX](data-structures.md#hsetnx) | ➕ |  |
-|  | HSTRLEN | ➖ |  |
+|  | [HSTRLEN](data-structures.md#hstrlen) | ➕ |  |
 |  | [HVALS](data-structures.md#hvals) | ➕ |  |
 | <span id="hyperloglog">**HYPERLOGLOG**</span> | [PFADD](analytics.md#pfadd) | ➕ |  |
 |  | [PFCOUNT](analytics.md#pfcount) | ➕ |  |
@@ -129,16 +143,16 @@ Note that this list is subject to change as we continue to expand our API comman
 |  | [DEL](generic-commands.md#del)  | ➕ |  |
 |  | DUMP | ➖ |  |
 |  | [EXISTS](generic-commands.md#exists) | ➕ |  |
-|  | [EXPIRE](generic-commands.md#expire-expire) | ➕ |  |
+|  | [EXPIRE](generic-commands.md#expire) | ➕ |  |
 |  | EXPIREAT | ➖ |  |
 |  | EXPIRETIME | ➖ |  |
 |  | [KEYS](generic-commands.md#keys) | ➕ |  |
 |  | [MIGRATE](generic-commands.md#migrate) | ➕ |  |
 |  | MOVE | ➖ |  |
-| <span id="list">**LIST**</span> | BLMOVE | ➖ |  |
+| <span id="list">**LIST**</span> | [BLMOVE](data-structures.md#blmove) | ➕ |  |
 |  | BLMPOP | ➖ |  |
-|  | BLPOP | ➖ |  |
-|  | BRPOP | ➖ |  |
+|  | [BLPOP](data-structures.md#blpop) | ➕ |  |
+|  | [BRPOP](data-structures.md#brpop) | ➕ |  |
 |  | BRPOPLPUSH | ➖ |  |
 |  | [LINDEX](data-structures.md#lindex) | ➕ |  |
 |  | [LINSERT](data-structures.md#linsert) | ➕ |  |
@@ -151,7 +165,7 @@ Note that this list is subject to change as we continue to expand our API comman
 |  | [LPUSHX](data-structures.md#lpushx) | ➕ |  |
 |  | [LRANGE](data-structures.md#lrange) | ➕ |  |
 |  | [LREM](data-structures.md#lrem) | ➕ |  |
-|  | LSET | ➖ |  |
+|  | [LSET](data-structures.md#lset) | ➕ |  |
 |  | [LTRIM](data-structures.md#ltrim) | ➕ |  |
 |  | [RPOP](data-structures.md#rpop) | ➕ |  |
 |  | [RPOPLPUSH](data-structures.md#rpoplpush) | ➕ |  |
@@ -178,6 +192,12 @@ Note that this list is subject to change as we continue to expand our API comman
 |  | BGREWRITEAOF | ➖ |  |
 |  | [BGSAVE](checkpoint.md#bgsave) | ➕ |  |
 |  | [COMMAND](server.md#command) | ➕ |  |
+|  | [COMMAND COUNT](server.md#command-count) | ➕ |  |
+|  | COMMAND DOCS | ➖ |  |
+|  | COMMAND GETKEYS | ➖ |  |
+|  | COMMAND GETKEYSANDFLAGS | ➖ |  | 
+|  | [COMMAND INFO](server.md#command-info) | ➕ |  | 
+|  | COMMAND LIST | ➖ |  | 
 |  | [COMMITAOF](server.md#commitaof) | ➕ |  |
 |  | [CONFIG GET](server.md#config-get) | ➕ |  |
 |  | [CONFIG SET](server.md#config-set) | ➕ |  |
@@ -213,21 +233,21 @@ Note that this list is subject to change as we continue to expand our API comman
 |  | [TIME](server.md#time) | ➕ |  |
 | <span id="set">**SET**</span> | [SADD](data-structures.md#sadd) | ➕ |  |
 |  | [SCARD](data-structures.md#scard) | ➕ |  |
-|  | SDIFF | ➖ |  |
-|  | SDIFFSTORE | ➖ |  |
-|  | SINTER | ➖ |  |
+|  | [SDIFF](data-structures.md#sdiff) | ➕ |  |
+|  | [SDIFFSTORE](data-structures.md#sdiffstore) | ➕ |  |
+|  | [SINTER](data-structures.md#sinter) | ➕ |  |
+|  | [SINTERSTORE](data-structures.md#sinterstore) | ➕ |  |
 |  | SINTERCARD | ➖ |  |
-|  | SINTERSTORE | ➖ |  |
-|  | SISMEMBER | ➖ |  |
+|  | SISMEMBER | ➕ |  |
 |  | [SMEMBERS](data-structures.md#smembers) | ➕ |  |
 |  | SMISMEMBER | ➖ |  |
 |  | SMOVE | ➖ |  |
 |  | [SPOP](data-structures.md#spop) | ➕ |  |
-|  | SRANDMEMBER | ➖ |  |
+|  | [SRANDMEMBER](data-structures.md#srandmember) | ➕ |  |
 |  | [SREM](data-structures.md#srem) | ➕ |  |
-|  | [SSCAN](data-structures.md#sscan-sscan) | ➕ |  |
-|  | SUNION | ➖ |  |
-|  | SUNIONSTORE | ➖ |  |
+|  | [SSCAN](data-structures.md#sscan) | ➕ |  |
+|  | [SUNION](data-structures.md#sunion) | ➕ |  |
+|  | [SUNIONSTORE](data-structures.md#sunionstore) | ➕ |  |
 | <span id="sorted-set">**SORTED SET**</span> | BZPOP | ➖ |  |
 |  | BZPOPMAX | ➖ |  |
 |  | BZPOPMIN | ➖ |  |
@@ -242,7 +262,7 @@ Note that this list is subject to change as we continue to expand our API comman
 |  | ZINTERSTORE | ➖ |  |
 |  | [ZLEXCOUNT](data-structures.md#zlexcount) | ➕ |  |
 |  | ZMPOP | ➖ |  |
-|  | ZMSCORE | ➖ |  |
+|  | [ZMSCORE](data-structures.md#zmscore) | ➕ |  |
 |  | [ZPOPMAX](data-structures.md#zpopmax) | ➕ |  |
 |  | [ZPOPMIN](data-structures.md#zpopmin) | ➕ |  |
 |  | [ZRANDMEMBER](data-structures.md#zrandmember) | ➕ |  |
@@ -297,7 +317,7 @@ Note that this list is subject to change as we continue to expand our API comman
 |  | [SET](raw-string.md#set) | ➕ |  |
 |  | [SET ... NX](raw-string.md#set) | ➕ |  |
 |  | [SETEX](raw-string.md#setex) | ➕ |  |
-|  | [SETNX](raw-string.md#setnx) | ➕ |  |
+|  | SETNX | ➖ |  |
 |  | SETRANGE | ➕ |  |
 |  | [STRLEN](raw-string.md#strlen) | ➕ |  |
 |  | SUBSTR | ➖ |  |

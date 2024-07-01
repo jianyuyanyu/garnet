@@ -2,8 +2,10 @@
 // Licensed under the MIT license.
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
+using Garnet.server;
 using NUnit.Framework;
 using StackExchange.Redis;
 
@@ -13,18 +15,28 @@ namespace Garnet.test
     public class RespAofTests
     {
         GarnetServer server;
-        static readonly SortedSetEntry[] entries = new SortedSetEntry[]
-        {
-            new SortedSetEntry("a", 1), new SortedSetEntry("b", 2), new SortedSetEntry("c", 3),
-            new SortedSetEntry("d", 4), new SortedSetEntry("e", 5), new SortedSetEntry("f", 6),
-            new SortedSetEntry("g", 7), new SortedSetEntry("h", 8), new SortedSetEntry("i", 9),
+        private IReadOnlyDictionary<string, RespCommandsInfo> respCustomCommandsInfo;
+
+        static readonly SortedSetEntry[] entries =
+        [
+            new SortedSetEntry("a", 1),
+            new SortedSetEntry("b", 2),
+            new SortedSetEntry("c", 3),
+            new SortedSetEntry("d", 4),
+            new SortedSetEntry("e", 5),
+            new SortedSetEntry("f", 6),
+            new SortedSetEntry("g", 7),
+            new SortedSetEntry("h", 8),
+            new SortedSetEntry("i", 9),
             new SortedSetEntry("j", 10)
-        };
+        ];
 
         [SetUp]
         public void Setup()
         {
             TestUtils.DeleteDirectory(TestUtils.MethodTestDir, wait: true);
+            Assert.IsTrue(TestUtils.TryGetCustomCommandsInfo(out respCustomCommandsInfo));
+            Assert.IsNotNull(respCustomCommandsInfo);
             server = TestUtils.CreateGarnetServer(TestUtils.MethodTestDir, enableAOF: true, lowMemory: true);
             server.Start();
         }
@@ -333,7 +345,7 @@ namespace Garnet.test
                 var db = redis.GetDatabase(0);
                 for (int i = 0; i < 100; i++)
                 {
-                    SortedSetEntry[] entry = new SortedSetEntry[] { new SortedSetEntry("a", 1), new SortedSetEntry("b", 2) };
+                    SortedSetEntry[] entry = [new SortedSetEntry("a", 1), new SortedSetEntry("b", 2)];
                     db.SortedSetAdd(key + i, entry);
 
                     var score = db.SortedSetScore(key + i, "a");
@@ -341,7 +353,7 @@ namespace Garnet.test
                     Assert.AreEqual(1, score.Value);
 
                 }
-                SortedSetEntry[] newEntries = new SortedSetEntry[] { new SortedSetEntry("bbbb", 4) };
+                SortedSetEntry[] newEntries = [new SortedSetEntry("bbbb", 4)];
                 db.SortedSetAdd("AofRMWObjectStoreRecoverTestKey" + 1, newEntries);
             }
             server.Store.CommitAOF(true);
@@ -359,6 +371,96 @@ namespace Garnet.test
 
                 score = db.SortedSetScore(key + 1, "x");
                 Assert.False(score.HasValue);
+            }
+        }
+
+        [Test]
+        public void AofUpsertObjectStoreRecoverTest()
+        {
+            var origList = new RedisValue[] { "a", "b", "c", "d" };
+            var key1 = "lkey1";
+            var key2 = "lkey2";
+
+            using (var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig()))
+            {
+                var db = redis.GetDatabase(0);
+                var count = db.ListRightPush(key1, origList);
+                Assert.AreEqual(4, count);
+
+                var result = db.ListRange(key1);
+                Assert.AreEqual(origList, result);
+
+                var rb = db.KeyRename(key1, key2);
+                Assert.IsTrue(rb);
+                result = db.ListRange(key1);
+                Assert.AreEqual(Array.Empty<RedisValue>(), result);
+
+                result = db.ListRange(key2);
+                Assert.AreEqual(origList, result);
+            }
+
+            server.Store.CommitAOF(true);
+            server.Dispose(false);
+            server = TestUtils.CreateGarnetServer(TestUtils.MethodTestDir, tryRecover: true, enableAOF: true);
+            server.Start();
+
+            using (var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig()))
+            {
+                var db = redis.GetDatabase(0);
+
+                var result = db.ListRange(key2);
+                Assert.AreEqual(origList, result);
+            }
+        }
+
+        [Test]
+        public void AofUpsertCustomObjectRecoverTest()
+        {
+            void RegisterCustomCommand(GarnetServer gServer)
+            {
+                var factory = new MyDictFactory();
+                gServer.Register.NewCommand("MYDICTSET", 2, CommandType.ReadModifyWrite, factory, respCustomCommandsInfo["MYDICTSET"]);
+                gServer.Register.NewCommand("MYDICTGET", 1, CommandType.Read, factory, respCustomCommandsInfo["MYDICTGET"]);
+            }
+
+            server.Dispose(false);
+            server = TestUtils.CreateGarnetServer(TestUtils.MethodTestDir, enableAOF: true);
+            RegisterCustomCommand(server);
+            server.Start();
+
+            var mainKey1 = "key1";
+            var subKey = "subKey";
+            var subKeyValue = "subKeyValue";
+            var mainKey2 = "key2";
+            using (var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig(allowAdmin: true)))
+            {
+                var db = redis.GetDatabase(0);
+
+                db.Execute("MYDICTSET", mainKey1, subKey, subKeyValue);
+                var retValue = db.Execute("MYDICTGET", mainKey1, subKey);
+                Assert.AreEqual(subKeyValue, (string)retValue);
+
+                var rb = db.KeyRename(mainKey1, mainKey2);
+                Assert.IsTrue(rb);
+                retValue = db.Execute("MYDICTGET", mainKey1, subKey);
+                Assert.IsTrue(retValue.IsNull);
+
+                retValue = db.Execute("MYDICTGET", mainKey2, subKey);
+                Assert.AreEqual(subKeyValue, (string)retValue);
+            }
+
+            server.Store.CommitAOF(true);
+            server.Dispose(false);
+            server = TestUtils.CreateGarnetServer(TestUtils.MethodTestDir, tryRecover: true, enableAOF: true);
+            RegisterCustomCommand(server);
+            server.Start();
+
+            using (var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig()))
+            {
+                var db = redis.GetDatabase(0);
+
+                var retValue = db.Execute("MYDICTGET", mainKey2, subKey);
+                Assert.AreEqual(subKeyValue, (string)retValue);
             }
         }
 

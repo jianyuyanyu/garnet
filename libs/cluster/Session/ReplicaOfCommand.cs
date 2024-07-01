@@ -22,54 +22,61 @@ namespace Garnet.cluster
             readHead = (int)(ptr - recvBufferPtr);
 
             //Turn of replication and make replica into a primary but do not delete data
-            if (address.ToUpper().Equals("NO") && portStr.ToUpper().Equals("ONE"))
+            if (address.Equals("NO", StringComparison.OrdinalIgnoreCase) &&
+                portStr.Equals("ONE", StringComparison.OrdinalIgnoreCase))
             {
-                clusterProvider.clusterManager?.TryResetReplica();
-                clusterProvider.replicationManager.TryUpdateForFailover();
-                UnsafeWaitForConfigTransition();
+                try
+                {
+                    if (!clusterProvider.replicationManager.StartRecovery())
+                    {
+                        logger?.LogError($"{nameof(TryREPLICAOF)}: {{logMessage}}", Encoding.ASCII.GetString(CmdStrings.RESP_ERR_GENERIC_CANNOT_ACQUIRE_RECOVERY_LOCK));
+                        while (!RespWriteUtils.WriteError(CmdStrings.RESP_ERR_GENERIC_CANNOT_ACQUIRE_RECOVERY_LOCK, ref dcurr, dend))
+                            SendAndReset();
+                        return true;
+                    }
+                    clusterProvider.clusterManager.TryResetReplica();
+                    clusterProvider.replicationManager.TryUpdateForFailover();
+                    UnsafeBumpAndWaitForEpochTransition();
+                }
+                finally
+                {
+                    clusterProvider.replicationManager.SuspendRecovery();
+                }
             }
             else
             {
-                int port = -1;
-                try
+                if (!int.TryParse(portStr, out var port))
                 {
-                    port = int.Parse(portStr);
-                }
-                catch (Exception ex)
-                {
-                    logger?.LogWarning("TryREPLICAOF {msg}", ex.Message);
-                    while (!RespWriteUtils.WriteResponse(Encoding.ASCII.GetBytes($"-ERR REPLICAOF {ex.Message}"), ref dcurr, dend))
+                    logger?.LogWarning("TryREPLICAOF failed to parse port {port}", portStr);
+                    while (!RespWriteUtils.WriteError($"ERR REPLICAOF failed to parse port '{portStr}'", ref dcurr, dend))
                         SendAndReset();
                     return true;
                 }
 
-                //TODO: Delete data and make this node a replica of the node listening at endpoint
-                if (clusterProvider.serverOptions.EnableCluster)
+                var primaryId = clusterProvider.clusterManager.CurrentConfig.GetWorkerNodeIdFromAddress(address, port);
+                if (primaryId == null)
                 {
-                    var primaryId = clusterProvider.clusterManager.CurrentConfig.GetWorkerNodeIdFromAddress(address, port);
-                    if (primaryId == null)
-                    {
-                        while (!RespWriteUtils.WriteResponse(Encoding.ASCII.GetBytes($"-ERR I don't know about node {address}:{port}.\r\n"), ref dcurr, dend))
-                            SendAndReset();
-                        return true;
-                    }
-                    else
-                    {
-                        var resp = clusterProvider.replicationManager.BeginReplicate(this, primaryId, background: false, force: true);
-                        while (!RespWriteUtils.WriteResponse(resp, ref dcurr, dend))
-                            SendAndReset();
-                        return true;
-                    }
+                    while (!RespWriteUtils.WriteError($"ERR I don't know about node {address}:{port}.", ref dcurr, dend))
+                        SendAndReset();
+                    return true;
                 }
                 else
                 {
-                    while (!RespWriteUtils.WriteResponse(Encoding.ASCII.GetBytes($"-ERR REPLICAOF available only when cluster enabled.\r\n"), ref dcurr, dend))
-                        SendAndReset();
+                    if (!clusterProvider.replicationManager.TryBeginReplicate(this, primaryId, background: false, force: true, out var errorMessage))
+                    {
+                        while (!RespWriteUtils.WriteError(errorMessage, ref dcurr, dend))
+                            SendAndReset();
+                    }
+                    else
+                    {
+                        while (!RespWriteUtils.WriteDirect(CmdStrings.RESP_OK, ref dcurr, dend))
+                            SendAndReset();
+                    }
                     return true;
                 }
             }
 
-            while (!RespWriteUtils.WriteResponse(CmdStrings.RESP_OK, ref dcurr, dend))
+            while (!RespWriteUtils.WriteDirect(CmdStrings.RESP_OK, ref dcurr, dend))
                 SendAndReset();
 
             return true;

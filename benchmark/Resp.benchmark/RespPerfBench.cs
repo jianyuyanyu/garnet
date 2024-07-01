@@ -96,7 +96,7 @@ namespace Resp.benchmark
                 fixed (byte* buf = client.ResponseBuffer)
                 {
                     byte* ptr = buf;
-                    RespReadUtils.ReadIntegerAsString(out dbSize, ref ptr, ptr + client.ResponseBuffer.Length);
+                    RespReadResponseUtils.ReadIntegerAsString(out dbSize, ref ptr, ptr + client.ResponseBuffer.Length);
                 }
             }
             else
@@ -472,7 +472,7 @@ namespace Resp.benchmark
             bool checkResults = false;
             int DbSize = database.Length;
 
-            using var redis = ConnectionMultiplexer.Connect($"{opts.Address}:{opts.Port},connectTimeout=999999,syncTimeout=999999"); // Redis: 6379, Garnet: 3278
+            using var redis = ConnectionMultiplexer.Connect($"{opts.Address}:{opts.Port},connectTimeout=999999,syncTimeout=999999");
             IDatabase db = redis.GetDatabase(0);
 
             Random r = new(threadid);

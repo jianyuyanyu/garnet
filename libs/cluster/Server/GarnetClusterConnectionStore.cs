@@ -68,7 +68,7 @@ namespace Garnet.cluster
                 for (int i = 0; i < numConnection; i++)
                 {
                     var _conn = connections[i];
-                    if (_conn.nodeid == conn.nodeid)
+                    if (_conn.NodeId.Equals(conn.NodeId, StringComparison.OrdinalIgnoreCase))
                     {
                         return false;
                     }
@@ -107,7 +107,7 @@ namespace Garnet.cluster
                 for (int i = 0; i < numConnection; i++)
                 {
                     var _conn = connections[i];
-                    if (nodeId == _conn.nodeid)
+                    if (nodeId.Equals(_conn.NodeId, StringComparison.OrdinalIgnoreCase))
                     {
                         connections[i] = null;
                         if (i < numConnection - 1)
@@ -147,7 +147,7 @@ namespace Garnet.cluster
             for (int i = 0; i < numConnection; i++)
             {
                 var _conn = connections[i];
-                if (_conn.nodeid == nodeId)
+                if (_conn.NodeId.Equals(nodeId, StringComparison.OrdinalIgnoreCase))
                 {
                     conn = _conn;
                     return true;
@@ -244,7 +244,7 @@ namespace Garnet.cluster
                 {
                     var nowTicks = DateTimeOffset.UtcNow.Ticks;
                     var last_io_seconds = conn.GossipRecv == -1 ? -1 : nowTicks - conn.GossipSend;
-                    last_io_seconds = last_io_seconds < 0 ? 0 : TimeSpan.FromTicks(last_io_seconds).Seconds;
+                    last_io_seconds = last_io_seconds < 0 ? 0 : (int)TimeSpan.FromTicks(last_io_seconds).TotalSeconds;
                     var connection_status = conn.IsConnected ? "up" : "down";
                     linkStatus[0] = new("master_link_status", connection_status);
                     linkStatus[1] = new("master_last_io_seconds_ago", last_io_seconds.ToString());

@@ -2,6 +2,7 @@
 // Licensed under the MIT license.
 
 using System;
+using System.IO;
 using System.Linq;
 using NUnit.Framework;
 using Tsavorite.core;
@@ -14,14 +15,15 @@ namespace Tsavorite.test
     {
         private TsavoriteKV<byte[], byte[]> store;
         private ClientSession<byte[], byte[], byte[], byte[], Empty, MyByteArrayFuncs> session;
+        private BasicContext<byte[], byte[], byte[], byte[], Empty, MyByteArrayFuncs> bContext;
         private IDevice log, objlog;
 
         [SetUp]
         public void Setup()
         {
             TestUtils.DeleteDirectory(TestUtils.MethodTestDir, wait: true);
-            log = Devices.CreateLogDevice(TestUtils.MethodTestDir + "/GenericStringTests.log", deleteOnClose: true);
-            objlog = Devices.CreateLogDevice(TestUtils.MethodTestDir + "/GenericStringTests.obj.log", deleteOnClose: true);
+            log = Devices.CreateLogDevice(Path.Join(TestUtils.MethodTestDir, "GenericStringTests.log"), deleteOnClose: true);
+            objlog = Devices.CreateLogDevice(Path.Join(TestUtils.MethodTestDir, "GenericStringTests.obj.log"), deleteOnClose: true);
 
             store = new TsavoriteKV<byte[], byte[]>(
                     1L << 20, // size of hash table in #cache lines; 64 bytes per cache line
@@ -30,6 +32,7 @@ namespace Tsavorite.test
                     );
 
             session = store.NewSession<byte[], byte[], Empty, MyByteArrayFuncs>(new MyByteArrayFuncs());
+            bContext = session.BasicContext;
         }
 
         [TearDown]
@@ -62,9 +65,9 @@ namespace Tsavorite.test
             {
                 var _key = GetByteArray(i);
                 var _value = GetByteArray(i);
-                session.Upsert(ref _key, ref _value, Empty.Default, 0);
+                bContext.Upsert(ref _key, ref _value, Empty.Default);
             }
-            session.CompletePending(true);
+            bContext.CompletePending(true);
 
             for (int i = 0; i < totalRecords; i++)
             {
@@ -73,9 +76,9 @@ namespace Tsavorite.test
                 var key = GetByteArray(i);
                 var value = GetByteArray(i);
 
-                if (session.Read(ref key, ref input, ref output, Empty.Default, 0).IsPending)
+                if (bContext.Read(ref key, ref input, ref output, Empty.Default).IsPending)
                 {
-                    session.CompletePending(true);
+                    bContext.CompletePending(true);
                 }
                 else
                 {
@@ -84,7 +87,7 @@ namespace Tsavorite.test
             }
         }
 
-        class MyByteArrayFuncs : SimpleFunctions<byte[], byte[]>
+        class MyByteArrayFuncs : SimpleSimpleFunctions<byte[], byte[]>
         {
             public override void ReadCompletionCallback(ref byte[] key, ref byte[] input, ref byte[] output, Empty ctx, Status status, RecordMetadata recordMetadata)
             {

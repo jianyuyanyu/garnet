@@ -2,6 +2,7 @@
 // Licensed under the MIT license.
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
 using Garnet.common;
@@ -31,7 +32,6 @@ namespace Garnet.cluster
         internal long GarnetCurrentEpoch = 1;
         ClusterAuthContainer authContainer;
 
-
         /// <summary>
         /// Get cluster username
         /// </summary>
@@ -57,18 +57,16 @@ namespace Garnet.cluster
                 ClusterPassword = serverOptions.ClusterPassword
             };
 
-            if (serverOptions.GossipSamplePercent > 100 || serverOptions.GossipSamplePercent < 0)
+            if (serverOptions.GossipSamplePercent is > 100 or < 0)
             {
                 throw new Exception("Gossip sample fraction should be in range [0,100]");
             }
 
-            this.clusterManager = NewClusterManagerInstance(serverOptions, loggerFactory);
-            this.replicationManager = NewReplicationManagerInstance(serverOptions, this, loggerFactory);
-            // Now set replication manager field in cluster manager, to break circular dependency
-            if (clusterManager != null) clusterManager.replicationManager = replicationManager;
+            this.clusterManager = new ClusterManager(this, logger: loggerFactory?.CreateLogger("ClusterManager"));
+            this.replicationManager = new ReplicationManager(this, logger: loggerFactory?.CreateLogger("ReplicationManager"));
 
-            this.failoverManager = NewFailoverManagerInstance(serverOptions, this, loggerFactory);
-            this.migrationManager = NewMigrationManagerInstance(this, loggerFactory);
+            this.failoverManager = new FailoverManager(this, logger: loggerFactory?.CreateLogger("FailoverManager"));
+            this.migrationManager = new MigrationManager(this, logger: loggerFactory?.CreateLogger("MigrationManager"));
         }
 
         /// <inheritdoc />
@@ -114,7 +112,7 @@ namespace Garnet.cluster
 
         /// <inheritdoc />
         public bool IsReplica()
-            => clusterManager?.CurrentConfig.GetLocalNodeRole() == NodeRole.REPLICA || replicationManager?.recovering == true;
+            => clusterManager?.CurrentConfig.LocalNodeRole == NodeRole.REPLICA || replicationManager?.Recovering == true;
 
         /// <inheritdoc />
         public void ResetGossipStats()
@@ -134,9 +132,9 @@ namespace Garnet.cluster
         /// <inheritdoc />
         public void SafeTruncateAOF(StoreType storeType, bool full, long CheckpointCoveredAofAddress, Guid storeCheckpointToken, Guid objectStoreCheckpointToken)
         {
-            CheckpointEntry entry = new CheckpointEntry();
+            var entry = new CheckpointEntry();
 
-            if (storeType == StoreType.Main || storeType == StoreType.All)
+            if (storeType is StoreType.Main or StoreType.All)
             {
                 entry.storeVersion = storeWrapper.store.CurrentVersion;
                 entry.storeHlogToken = storeCheckpointToken;
@@ -145,7 +143,7 @@ namespace Garnet.cluster
                 entry.storePrimaryReplId = replicationManager.PrimaryReplId;
             }
 
-            if (storeType == StoreType.Object || storeType == StoreType.All)
+            if (storeType is StoreType.Object or StoreType.All)
             {
                 entry.objectStoreVersion = serverOptions.DisableObjects ? -1 : storeWrapper.objectStore.CurrentVersion;
                 entry.objectStoreHlogToken = serverOptions.DisableObjects ? default : objectStoreCheckpointToken;
@@ -158,8 +156,8 @@ namespace Garnet.cluster
             // Used to delete old checkpoints and cleanup and also cleanup during attachment to new primary
             replicationManager.AddCheckpointEntry(entry, storeType, full);
 
-            if (clusterManager.CurrentConfig.GetLocalNodeRole() == NodeRole.PRIMARY)
-                replicationManager.SafeTruncateAof(CheckpointCoveredAofAddress);
+            if (clusterManager.CurrentConfig.LocalNodeRole == NodeRole.PRIMARY)
+                _ = replicationManager.SafeTruncateAof(CheckpointCoveredAofAddress);
             else
             {
                 if (serverOptions.MainMemoryReplication)
@@ -176,42 +174,39 @@ namespace Garnet.cluster
         public void OnCheckpointInitiated(out long CheckpointCoveredAofAddress)
         {
             Debug.Assert(serverOptions.EnableCluster);
-            if (serverOptions.EnableAOF && clusterManager.CurrentConfig.GetLocalNodeRole() == NodeRole.REPLICA)
+            if (serverOptions.EnableAOF && clusterManager.CurrentConfig.LocalNodeRole == NodeRole.REPLICA)
                 CheckpointCoveredAofAddress = replicationManager.ReplicationOffset;
             else
                 CheckpointCoveredAofAddress = storeWrapper.appendOnlyFile.TailAddress;
 
             replicationManager?.UpdateCommitSafeAofAddress(CheckpointCoveredAofAddress);
-            replicationManager?.SetPrimaryReplicationId();
         }
 
         /// <inheritdoc />
         public MetricsItem[] GetReplicationInfo()
         {
-            bool clusterEnabled = serverOptions.EnableCluster;
-            ClusterConfig config = clusterEnabled ? clusterManager.CurrentConfig : null;
+            var clusterEnabled = serverOptions.EnableCluster;
+            var config = clusterEnabled ? clusterManager.CurrentConfig : null;
             var replicaInfo = clusterEnabled ? replicationManager.GetReplicaInfo() : null;
-            int replicaCount = clusterEnabled ? replicaInfo.Count : 0;
-            var role = clusterEnabled ? config.GetLocalNodeRole() : NodeRole.PRIMARY;
-            int commonInfoCount = 11;
-            int replicaInfoCount = 9;
-            int replicationInfoCount = commonInfoCount + replicaCount;
-            replicationInfoCount += role == NodeRole.REPLICA ? replicaInfoCount : 0;
-
-            var replicationInfo = new MetricsItem[replicationInfoCount];
-            replicationInfo[0] = (new("role", NodeRole.PRIMARY == role ? "master" : "slave"));
-            replicationInfo[1] = (new("connected_slaves", !clusterEnabled ? "0" : replicationManager.ConnectedReplicasCount.ToString()));
-            replicationInfo[2] = (new("master_failover_state", !clusterEnabled ? FailoverUtils.GetFailoverStatus(FailoverStatus.NO_FAILOVER) : failoverManager.GetFailoverStatus()));
-
+            var role = clusterEnabled ? config.LocalNodeRole : NodeRole.PRIMARY;
             var replication_offset = !clusterEnabled ? "N/A" : replicationManager.ReplicationOffset.ToString();
-            replicationInfo[3] = (new("master_replid", clusterEnabled ? replicationManager.PrimaryReplId : Generator.DefaultHexId()));
-            replicationInfo[4] = (new("master_replid2", clusterEnabled ? replicationManager.PrimaryReplId2 : Generator.DefaultHexId()));
-            replicationInfo[5] = (new("master_repl_offset", replication_offset));
-            replicationInfo[6] = (new("second_repl_offset", replication_offset));
-            replicationInfo[7] = (new("store_current_safe_aof_address", clusterEnabled ? replicationManager.StoreCurrentSafeAofAddress.ToString() : "N/A"));
-            replicationInfo[8] = (new("store_recovered_safe_aof_address", clusterEnabled ? replicationManager.StoreRecoveredSafeAofTailAddress.ToString() : "N/A"));
-            replicationInfo[9] = (new("object_store_current_safe_aof_address", clusterEnabled && !serverOptions.DisableObjects ? replicationManager.ObjectStoreCurrentSafeAofAddress.ToString() : "N/A"));
-            replicationInfo[10] = (new("object_store_recovered_safe_aof_address", clusterEnabled && !serverOptions.DisableObjects ? replicationManager.ObjectStoreRecoveredSafeAofTailAddress.ToString() : "N/A"));
+            var replication_offset2 = !clusterEnabled ? "N/A" : replicationManager.ReplicationOffset2.ToString();
+
+            var replicationInfo = new List<MetricsItem>()
+            {
+                new("role", NodeRole.PRIMARY == role ? "master" : "slave"),
+                new("connected_slaves", !clusterEnabled ? "0" : replicationManager.ConnectedReplicasCount.ToString()),
+                new("master_failover_state", !clusterEnabled ? FailoverUtils.GetFailoverStatus(FailoverStatus.NO_FAILOVER) : failoverManager.GetFailoverStatus()),
+                new("master_replid", clusterEnabled ? replicationManager.PrimaryReplId : Generator.DefaultHexId()),
+                new("master_replid2", clusterEnabled ? replicationManager.PrimaryReplId2 : Generator.DefaultHexId()),
+                new("master_repl_offset", replication_offset),
+                new("second_repl_offset", replication_offset2),
+                new("store_current_safe_aof_address", clusterEnabled ? replicationManager.StoreCurrentSafeAofAddress.ToString() : "N/A"),
+                new("store_recovered_safe_aof_address", clusterEnabled ? replicationManager.StoreRecoveredSafeAofTailAddress.ToString() : "N/A"),
+                new("object_store_current_safe_aof_address", clusterEnabled && !serverOptions.DisableObjects ? replicationManager.ObjectStoreCurrentSafeAofAddress.ToString() : "N/A"),
+                new("object_store_recovered_safe_aof_address", clusterEnabled && !serverOptions.DisableObjects ? replicationManager.ObjectStoreRecoveredSafeAofTailAddress.ToString() : "N/A")
+
+            };
 
             if (clusterEnabled)
             {
@@ -219,46 +214,45 @@ namespace Garnet.cluster
                 {
                     var (address, port) = config.GetLocalNodePrimaryAddress();
                     var primaryLinkStatus = clusterManager.GetPrimaryLinkStatus(config);
-                    replicationInfo[commonInfoCount + 0] = new("master_host", address);
-                    replicationInfo[commonInfoCount + 1] = new("master_port", port.ToString());
-                    replicationInfo[commonInfoCount + 2] = primaryLinkStatus[0];
-                    replicationInfo[commonInfoCount + 3] = primaryLinkStatus[1];
-                    replicationInfo[commonInfoCount + 4] = new("master_sync_in_progress", replicationManager.recovering.ToString());
-                    replicationInfo[commonInfoCount + 5] = new("slave_read_repl_offset", replication_offset);
-                    replicationInfo[commonInfoCount + 6] = new("slave_priority", "100");
-                    replicationInfo[commonInfoCount + 7] = new("slave_read_only", "1");
-                    replicationInfo[commonInfoCount + 8] = new("replica_announced", "1");
+                    replicationInfo.Add(new("master_host", address));
+                    replicationInfo.Add(new("master_port", port.ToString()));
+                    replicationInfo.Add(primaryLinkStatus[0]);
+                    replicationInfo.Add(primaryLinkStatus[1]);
+                    replicationInfo.Add(new("master_sync_in_progress", replicationManager.Recovering.ToString()));
+                    replicationInfo.Add(new("slave_read_repl_offset", replication_offset));
+                    replicationInfo.Add(new("slave_priority", "100"));
+                    replicationInfo.Add(new("slave_read_only", "1"));
+                    replicationInfo.Add(new("replica_announced", "1"));
+                    replicationInfo.Add(new("master_sync_last_io_seconds_ago", replicationManager.LastPrimarySyncSeconds.ToString()));
                 }
                 else
                 {
-                    //replica0: ip=127.0.0.1,port=7001,state=online,offset=56,lag=0
-                    int i = commonInfoCount;
+                    // replica0: ip=127.0.0.1,port=7001,state=online,offset=56,lag=0
                     foreach (var ri in replicaInfo)
-                        replicationInfo[i++] = new(ri.Item1, ri.Item2);
+                        replicationInfo.Add(new(ri.Item1, ri.Item2));
                 }
             }
-            return replicationInfo;
+            return [.. replicationInfo];
         }
 
         /// <inheritdoc />
-        public void GetGossipInfo(MetricsItem[] statsInfo, int startOffset, bool metricsDisabled)
+        public MetricsItem[] GetGossipStats(bool metricsDisabled)
         {
             var gossipStats = clusterManager.gossipStats;
-            statsInfo[startOffset] = (new("meet_requests_recv", metricsDisabled ? "0" : gossipStats.meet_requests_recv.ToString()));
-            statsInfo[startOffset + 1] = (new("meet_requests_succeed", metricsDisabled ? "0" : gossipStats.meet_requests_succeed.ToString()));
-            statsInfo[startOffset + 2] = (new("meet_requests_failed", metricsDisabled ? "0" : gossipStats.meet_requests_failed.ToString()));
-            statsInfo[startOffset + 3] = (new("gossip_success_count", metricsDisabled ? "0" : gossipStats.gossip_success_count.ToString()));
-            statsInfo[startOffset + 4] = (new("gossip_failed_count", metricsDisabled ? "0" : gossipStats.gossip_failed_count.ToString()));
-            statsInfo[startOffset + 5] = (new("gossip_timeout_count", metricsDisabled ? "0" : gossipStats.gossip_timeout_count.ToString()));
-            statsInfo[startOffset + 6] = (new("gossip_full_send", metricsDisabled ? "0" : gossipStats.gossip_full_send.ToString()));
-            statsInfo[startOffset + 7] = (new("gossip_empty_send", metricsDisabled ? "0" : gossipStats.gossip_empty_send.ToString()));
-            statsInfo[startOffset + 8] = (new("gossip_bytes_send", metricsDisabled ? "0" : gossipStats.gossip_bytes_send.ToString()));
-            statsInfo[startOffset + 9] = (new("gossip_bytes_recv", metricsDisabled ? "0" : gossipStats.gossip_bytes_recv.ToString()));
+            return
+                [
+                    new("meet_requests_recv", metricsDisabled ? "0" : gossipStats.meet_requests_recv.ToString()),
+                    new("meet_requests_succeed", metricsDisabled ? "0" : gossipStats.meet_requests_succeed.ToString()),
+                    new("meet_requests_failed", metricsDisabled ? "0" : gossipStats.meet_requests_failed.ToString()),
+                    new("gossip_success_count", metricsDisabled ? "0" : gossipStats.gossip_success_count.ToString()),
+                    new("gossip_failed_count", metricsDisabled ? "0" : gossipStats.gossip_failed_count.ToString()),
+                    new("gossip_timeout_count", metricsDisabled ? "0" : gossipStats.gossip_timeout_count.ToString()),
+                    new("gossip_full_send", metricsDisabled ? "0" : gossipStats.gossip_full_send.ToString()),
+                    new("gossip_empty_send", metricsDisabled ? "0" : gossipStats.gossip_empty_send.ToString()),
+                    new("gossip_bytes_send", metricsDisabled ? "0" : gossipStats.gossip_bytes_send.ToString()),
+                    new("gossip_bytes_recv", metricsDisabled ? "0" : gossipStats.gossip_bytes_recv.ToString())
+                ];
         }
-
-        /// <inheritdoc />
-        public DeviceLogCommitCheckpointManager CreateCheckpointManager(INamedDeviceFactory deviceFactory, ICheckpointNamingScheme checkpointNamingScheme, bool isMainStore)
-            => new(deviceFactory, checkpointNamingScheme, isMainStore);
 
         internal ReplicationLogCheckpointManager GetReplicationLogCheckpointManager(StoreType storeType)
         {
@@ -280,54 +274,27 @@ namespace Garnet.cluster
         /// Wait for config transition
         /// </summary>
         /// <returns></returns>
-        internal bool WaitForConfigTransition()
+        internal bool BumpAndWaitForEpochTransition()
         {
             var server = storeWrapper.GetServer();
             BumpCurrentEpoch();
             while (true)
             {
             retry:
-                var currentEpoch = GarnetCurrentEpoch;
                 Thread.Yield();
+                // Acquire latest bumped epoch
+                var currentEpoch = GarnetCurrentEpoch;
                 var sessions = server.ActiveClusterSessions();
                 foreach (var s in sessions)
                 {
                     var entryEpoch = s.LocalCurrentEpoch;
-                    if (entryEpoch != 0 && entryEpoch >= currentEpoch)
+                    // Retry if at least one session has not yet caught up to the current epoch.
+                    if (entryEpoch != 0 && entryEpoch < currentEpoch)
                         goto retry;
                 }
                 break;
             }
             return true;
-        }
-
-        ClusterManager NewClusterManagerInstance(GarnetServerOptions serverOptions, ILoggerFactory loggerFactory)
-        {
-            if (!serverOptions.EnableCluster)
-                return null;
-            return new ClusterManager(this, loggerFactory);
-        }
-
-        ReplicationManager NewReplicationManagerInstance(GarnetServerOptions serverOptions, ClusterProvider clusterProvider, ILoggerFactory loggerFactory)
-        {
-            if (!serverOptions.EnableCluster)
-                return null;
-            return new ReplicationManager(clusterProvider, opts: serverOptions, logger: loggerFactory?.CreateLogger("StoreWrapper"));
-        }
-
-        FailoverManager NewFailoverManagerInstance(GarnetServerOptions serverOptions, ClusterProvider clusterProvider, ILoggerFactory loggerFactory)
-        {
-            if (!serverOptions.EnableCluster)
-                return null;
-            var clusterTimeout = serverOptions.ClusterTimeout <= 0 ? Timeout.InfiniteTimeSpan : TimeSpan.FromSeconds(serverOptions.ClusterTimeout);
-            return new FailoverManager(clusterProvider, serverOptions, clusterTimeout, loggerFactory);
-        }
-
-        MigrationManager NewMigrationManagerInstance(ClusterProvider clusterProvider, ILoggerFactory loggerFactory)
-        {
-            if (!serverOptions.EnableCluster)
-                return null;
-            return new MigrationManager(clusterProvider, logger: loggerFactory?.CreateLogger("MigrationManager"));
         }
     }
 }

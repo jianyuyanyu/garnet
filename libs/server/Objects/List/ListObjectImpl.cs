@@ -4,7 +4,6 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using Garnet.common;
 using Tsavorite.core;
@@ -28,42 +27,55 @@ namespace Garnet.server
             *_output = default;
 
             //indicates partial execution
-            _output->countDone = Int32.MinValue;
+            _output->result1 = Int32.MinValue;
 
             // get the source string to remove
-            if (!RespReadUtils.ReadByteArrayWithLengthHeader(out var item, ref ptr, end))
+            if (!RespReadUtils.TrySliceWithLengthHeader(out var itemSpan, ref ptr, end))
                 return;
 
-            var count = _input->count;
-            var rem_count = 0;
-            _output->countDone = 0;
+            var count = _input->arg1;
+            var removedCount = 0;
+            _output->result1 = 0;
 
             //remove all equals to item
             if (count == 0)
             {
-                var elements = list.Count;
-                list.Where(i => i.SequenceEqual(item)).ToList().ForEach(i => { list.Remove(i); this.UpdateSize(i, false); });
-                rem_count = elements - list.Count;
+                var currentNode = list.First;
+                do
+                {
+                    var nextNode = currentNode.Next;
+                    if (currentNode.Value.AsSpan().SequenceEqual(itemSpan))
+                    {
+                        list.Remove(currentNode);
+                        this.UpdateSize(currentNode.Value, false);
+
+                        removedCount++;
+                    }
+                    currentNode = nextNode;
+                }
+                while (currentNode != null);
             }
             else
             {
-                while (rem_count < Math.Abs(count) && list.Count() > 0)
+                bool fromHeadToTail = count > 0;
+                var currentNode = fromHeadToTail ? list.First : list.Last;
+
+                count = Math.Abs(count);
+                while (removedCount < count && currentNode != null)
                 {
-                    var node = count > 0 ? list.FirstOrDefault(i => i.SequenceEqual(item)) : list.LastOrDefault(i => i.SequenceEqual(item));
-                    if (node != null)
+                    var nextNode = fromHeadToTail ? currentNode.Next : currentNode.Previous;
+
+                    if (currentNode.Value.AsSpan().SequenceEqual(itemSpan))
                     {
-                        list.Remove(node);
-                        this.UpdateSize(node, false);
-                        rem_count++;
+                        list.Remove(currentNode);
+                        this.UpdateSize(currentNode.Value, false);
+                        removedCount++;
                     }
-                    else
-                    {
-                        break;
-                    }
+
+                    currentNode = nextNode;
                 }
             }
-            _output->bytesDone = (int)(ptr - startptr);
-            _output->opsDone = rem_count;
+            _output->result1 = removedCount;
         }
 
         private void ListInsert(byte* input, int length, byte* output)
@@ -72,40 +84,49 @@ namespace Garnet.server
             byte* startptr = input + sizeof(ObjectInputHeader);
             byte* ptr = startptr;
             byte* end = input + length;
-            LinkedListNode<byte[]> current = null;
 
             var _output = (ObjectOutputHeader*)output;
             *_output = default;
 
             //indicates partial execution
-            _output->countDone = int.MinValue;
+            _output->result1 = int.MinValue;
 
             if (list.Count > 0)
             {
                 // figure out where to insert BEFORE or AFTER
-                if (!RespReadUtils.ReadByteArrayWithLengthHeader(out var position, ref ptr, end))
+                if (!RespReadUtils.TrySliceWithLengthHeader(out var position, ref ptr, end))
                     return;
 
                 // get the source string
-                if (!RespReadUtils.ReadByteArrayWithLengthHeader(out var pivot, ref ptr, end))
+                if (!RespReadUtils.TrySliceWithLengthHeader(out var pivot, ref ptr, end))
                     return;
 
                 // get the string to INSERT into the list
-                if (!RespReadUtils.ReadByteArrayWithLengthHeader(out var insertitem, ref ptr, end))
+                if (!RespReadUtils.ReadByteArrayWithLengthHeader(out var item, ref ptr, end))
                     return;
 
-                bool fBefore = CmdStrings.BEFORE.SequenceEqual(position);
+                var insertBefore = position.SequenceEqual(CmdStrings.BEFORE);
+
+                _output->result1 = -1;
 
                 // find the first ocurrence of the pivot element
-                current = list.Nodes().DefaultIfEmpty(null).FirstOrDefault(i => i.Value.SequenceEqual(pivot));
-                var newNode = current != default ? (fBefore ? list.AddBefore(current, insertitem) : list.AddAfter(current, insertitem)) : default;
-                if (current != null)
-                    this.UpdateSize(insertitem);
-                _output->opsDone = current != default ? list.Count : -1;
-                _output->countDone = _output->opsDone;
+                var currentNode = list.First;
+                do
+                {
+                    if (currentNode.Value.AsSpan().SequenceEqual(pivot))
+                    {
+                        if (insertBefore)
+                            list.AddBefore(currentNode, item);
+                        else
+                            list.AddAfter(currentNode, item);
+
+                        this.UpdateSize(item);
+                        _output->result1 = list.Count;
+                        break;
+                    }
+                }
+                while ((currentNode = currentNode.Next) != null);
             }
-            // Write bytes parsed from input and count done, into output footer
-            _output->bytesDone = (int)(ptr - startptr);
         }
 
         private void ListIndex(byte* input, ref SpanByteAndMemory output)
@@ -121,23 +142,20 @@ namespace Garnet.server
             byte[] item = default;
 
             ObjectOutputHeader _output = default;
-            _output.opsDone = -1;
+            _output.result1 = -1;
             try
             {
-                var index = _input->count < 0 ? list.Count + _input->count : _input->count;
+                var index = _input->arg1 < 0 ? list.Count + _input->arg1 : _input->arg1;
                 item = list.ElementAtOrDefault(index);
                 if (item != default)
                 {
                     while (!RespWriteUtils.WriteBulkString(item, ref curr, end))
                         ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
-                    _output.opsDone = 1;
+                    _output.result1 = 1;
                 }
             }
             finally
             {
-                _output.countDone = _output.opsDone;
-                _output.bytesDone = 0;
-
                 while (!RespWriteUtils.WriteDirect(ref _output, ref curr, end))
                     ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
 
@@ -168,10 +186,10 @@ namespace Garnet.server
                 }
                 else
                 {
-                    var start = _input->count < 0 ? list.Count + _input->count : _input->count;
+                    var start = _input->arg1 < 0 ? list.Count + _input->arg1 : _input->arg1;
                     if (start < 0) start = 0;
 
-                    var stop = _input->done < 0 ? list.Count + _input->done : _input->done;
+                    var stop = _input->arg2 < 0 ? list.Count + _input->arg2 : _input->arg2;
                     if (stop < 0) stop = 0;
                     if (stop >= list.Count) stop = list.Count - 1;
 
@@ -179,7 +197,6 @@ namespace Garnet.server
                     {
                         while (!RespWriteUtils.WriteEmptyArray(ref curr, end))
                             ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
-                        _output.opsDone = 0;
                     }
                     else
                     {
@@ -187,17 +204,20 @@ namespace Garnet.server
                         while (!RespWriteUtils.WriteArrayLength(count, ref curr, end))
                             ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
 
-                        for (int i = start; i <= stop; i++)
+                        var i = -1;
+                        foreach (var bytes in list)
                         {
-                            while (!RespWriteUtils.WriteBulkString(list.ElementAt(i), ref curr, end))
+                            i++;
+                            if (i < start)
+                                continue;
+                            if (i > stop)
+                                break;
+                            while (!RespWriteUtils.WriteBulkString(bytes, ref curr, end))
                                 ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
                         }
-                        _output.opsDone = count;
+                        _output.result1 = count;
                     }
                 }
-                //updating output
-                _output.bytesDone = 0; // no reads done 
-                _output.countDone = _output.opsDone;
             }
             finally
             {
@@ -211,61 +231,57 @@ namespace Garnet.server
 
         private void ListTrim(byte* input, byte* output)
         {
-            var _input = (ObjectInputHeader*)input;
-            var _output = (ObjectOutputHeader*)output;
+            var inputHeader = (ObjectInputHeader*)input;
+            var outputHeader = (ObjectOutputHeader*)output;
 
             if (list.Count > 0)
             {
-                var start = _input->count < 0 ? list.Count + _input->count : _input->count;
-                if (start < -(list.Count - 1) || start >= list.Count) start = list.Count - 1;
+                var start = inputHeader->arg1 < 0 ? list.Count + inputHeader->arg1 : inputHeader->arg1;
+                var end = inputHeader->arg2 < 0 ? list.Count + inputHeader->arg2 : inputHeader->arg2;
 
-                var end = _input->done < 0 ? list.Count + _input->done : _input->done;
-                if (end < -(list.Count - 1) || end >= list.Count) end = list.Count - 1;
-
-                Debug.Assert(end - start <= list.Count);
-                if (start > end)
+                if (start > end || start >= list.Count || end < 0)
                 {
-                    _output->opsDone = list.Count;
                     list.Clear();
                 }
                 else
                 {
-                    // Only  the first end+1 elements will remain
+                    start = start < 0 ? 0 : start;
+                    end = end >= list.Count ? list.Count : end + 1;
+
+                    // Only  the first end elements will remain
                     if (start == 0)
                     {
-                        var numDeletes = list.Count - (end + 1);
-                        for (int i = 0; i < numDeletes; i++)
+                        var numDeletes = list.Count - end;
+                        for (var i = 0; i < numDeletes; i++)
                         {
-                            var _value = list.Last.Value;
+                            var value = list.Last!.Value;
                             list.RemoveLast();
-                            this.UpdateSize(_value, false);
+                            this.UpdateSize(value, false);
                         }
-                        _output->opsDone = numDeletes;
+                        outputHeader->result1 = numDeletes;
                     }
                     else
                     {
-                        int i = 0;
+                        var i = 0;
                         IList<byte[]> readOnly = new List<byte[]>(list).AsReadOnly();
-                        foreach (byte[] node in readOnly)
+                        foreach (var node in readOnly)
                         {
-                            if (!(i >= start && i <= end))
+                            if (!(i >= start && i < end))
                             {
                                 list.Remove(node);
                                 this.UpdateSize(node, false);
                             }
                             i++;
                         }
-                        _output->opsDone = i;
+                        outputHeader->result1 = i;
                     }
                 }
-                _output->bytesDone = 0;
-                _output->countDone = _output->opsDone;
             }
         }
 
         private void ListLength(byte* input, byte* output)
         {
-            ((ObjectOutputHeader*)output)->countDone = list.Count;
+            ((ObjectOutputHeader*)output)->result1 = list.Count;
         }
 
         private void ListPush(byte* input, int length, byte* output, bool fAddAtHead)
@@ -273,49 +289,40 @@ namespace Garnet.server
             var _input = (ObjectInputHeader*)input;
             var _output = (ObjectOutputHeader*)output;
 
-            int count = _input->count;
+            int count = _input->arg1;
             *_output = default;
 
             byte* startptr = input + sizeof(ObjectInputHeader);
             byte* ptr = startptr;
             byte* end = input + length;
 
-            //this value is used in the validations for partial execution
-            _output->countDone = Int32.MinValue;
-
+            _output->result1 = 0;
             for (int c = 0; c < count; c++)
             {
                 if (!RespReadUtils.ReadByteArrayWithLengthHeader(out var value, ref ptr, end))
                     return;
 
-                if (c < _input->done)
-                    continue;
-
-                //Add the value to the top of the list
+                // Add the value to the top of the list
                 if (fAddAtHead)
                     list.AddFirst(value);
                 else
                     list.AddLast(value);
 
                 this.UpdateSize(value);
-                _output->countDone = list.Count;
-                _output->opsDone++;
-                _output->bytesDone = (int)(ptr - startptr);
             }
+            _output->result1 = list.Count;
         }
 
         private void ListPop(byte* input, ref SpanByteAndMemory output, bool fDelAtHead)
         {
             var _input = (ObjectInputHeader*)input;
-            int count = _input->count; // for multiple elements
+            int count = _input->arg1; // for multiple elements
 
             byte* input_startptr = input + sizeof(ObjectInputHeader);
             byte* input_currptr = input_startptr;
 
             if (list.Count < count)
                 count = list.Count;
-
-            int countDone = 0;
 
             bool isMemory = false;
             MemoryHandle ptrHandle = default;
@@ -353,18 +360,13 @@ namespace Garnet.server
                         list.RemoveLast();
                     }
 
-                    this.UpdateSize(node.Value, false);
+                    UpdateSize(node.Value, false);
                     while (!RespWriteUtils.WriteBulkString(node.Value, ref curr, end))
                         ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
 
                     count--;
-                    countDone++;
+                    _output.result1++;
                 }
-
-                // Write bytes parsed from input and count done, into output footer
-                _output.bytesDone = (int)(input_currptr - input_startptr);
-                _output.countDone = countDone;
-                _output.opsDone = countDone;
             }
             finally
             {
@@ -373,6 +375,76 @@ namespace Garnet.server
 
                 if (isMemory) ptrHandle.Dispose();
                 output.Length = (int)(curr - ptr);
+            }
+        }
+
+        private void ListSet(byte* input, int length, ref SpanByteAndMemory output)
+        {
+            var isMemory = false;
+            MemoryHandle ptrHandle = default;
+            var output_startptr = output.SpanByte.ToPointer();
+            var output_currptr = output_startptr;
+            var output_end = output_currptr + output.Length;
+
+            ObjectOutputHeader _output = default;
+
+            try
+            {
+                if (list.Count == 0)
+                {
+                    while (!RespWriteUtils.WriteError(CmdStrings.RESP_ERR_GENERIC_NOSUCHKEY, ref output_currptr, output_end))
+                        ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref output_startptr, ref ptrHandle, ref output_currptr, ref output_end);
+                    return;
+                }
+
+                byte* input_startptr = input + sizeof(ObjectInputHeader);
+                byte* input_currptr = input_startptr;
+                byte* input_end = input + length;
+
+                // index
+                if (!RespReadUtils.TrySliceWithLengthHeader(out var indexParamBytes, ref input_currptr, input_end))
+                    return;
+
+                if (!NumUtils.TryParse(indexParamBytes, out int index))
+                {
+                    while (!RespWriteUtils.WriteError(CmdStrings.RESP_ERR_GENERIC_VALUE_IS_NOT_INTEGER, ref output_currptr, output_end))
+                        ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref output_startptr, ref ptrHandle, ref output_currptr, ref output_end);
+                    return;
+                }
+
+                index = index < 0 ? list.Count + index : index;
+
+                if (index > list.Count - 1 || index < 0)
+                {
+                    while (!RespWriteUtils.WriteError(CmdStrings.RESP_ERR_GENERIC_INDEX_OUT_RANGE, ref output_currptr, output_end))
+                        ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref output_startptr, ref ptrHandle, ref output_currptr, ref output_end);
+                    return;
+                }
+
+                // element
+                if (!RespReadUtils.ReadByteArrayWithLengthHeader(out var element, ref input_currptr, input_end))
+                    return;
+
+                var targetNode = index == 0 ? list.First
+                    : (index == list.Count - 1 ? list.Last
+                        : list.Nodes().ElementAtOrDefault(index));
+
+                UpdateSize(targetNode.Value, false);
+                targetNode.Value = element;
+                UpdateSize(targetNode.Value);
+
+                while (!RespWriteUtils.WriteDirect(CmdStrings.RESP_OK, ref output_currptr, output_end))
+                    ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref output_startptr, ref ptrHandle, ref output_currptr, ref output_end);
+
+                _output.result1 = 1;
+            }
+            finally
+            {
+                while (!RespWriteUtils.WriteDirect(ref _output, ref output_currptr, output_end))
+                    ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref output_startptr, ref ptrHandle, ref output_currptr, ref output_end);
+
+                if (isMemory) ptrHandle.Dispose();
+                output.Length = (int)(output_currptr - output_startptr);
             }
         }
     }

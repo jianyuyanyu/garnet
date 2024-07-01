@@ -21,6 +21,11 @@ namespace Garnet.server.Custom
         /// Number of parameters required by custom command / transaction
         /// </summary>
         public int NumParams { get; set; }
+
+        /// <summary>
+        /// RESP command info
+        /// </summary>
+        public RespCommandsInfo CommandInfo { get; set; }
     }
 
 
@@ -37,7 +42,7 @@ namespace Garnet.server.Custom
     /// <summary>
     /// Custom transaction registration arguments
     /// </summary>
-    internal class RegisterTxnArgs : RegisterArgsBase
+    internal sealed class RegisterTxnArgs : RegisterArgsBase
     {
     }
 
@@ -163,7 +168,7 @@ namespace Garnet.server.Custom
     /// <summary>
     /// RawStringFunction registration provider
     /// </summary>
-    internal class RegisterRawStringFunctionProvider : RegisterCustomCmdProvider<CustomRawStringFunctions>
+    internal sealed class RegisterRawStringFunctionProvider : RegisterCustomCmdProvider<CustomRawStringFunctions>
     {
         public RegisterRawStringFunctionProvider(CustomRawStringFunctions instance, RegisterCmdArgs args) : base(instance, args)
         {
@@ -171,14 +176,20 @@ namespace Garnet.server.Custom
 
         public override void Register(CustomCommandManager customCommandManager)
         {
-            customCommandManager.Register(this.RegisterArgs.Name, this.RegisterArgs.NumParams, this.RegisterArgs.CommandType, this.Instance, this.RegisterArgs.ExpirationTicks);
+            customCommandManager.Register(
+                this.RegisterArgs.Name,
+                this.RegisterArgs.NumParams,
+                this.RegisterArgs.CommandType,
+                this.Instance,
+                this.RegisterArgs.CommandInfo,
+                this.RegisterArgs.ExpirationTicks);
         }
     }
 
     /// <summary>
     /// CustomObjectFactory registration provider
     /// </summary>
-    internal class RegisterCustomObjectFactoryProvider : RegisterCustomCmdProvider<CustomObjectFactory>
+    internal sealed class RegisterCustomObjectFactoryProvider : RegisterCustomCmdProvider<CustomObjectFactory>
     {
         public RegisterCustomObjectFactoryProvider(CustomObjectFactory instance, RegisterCmdArgs args) : base(instance, args)
         {
@@ -186,14 +197,14 @@ namespace Garnet.server.Custom
 
         public override void Register(CustomCommandManager customCommandManager)
         {
-            customCommandManager.Register(this.RegisterArgs.Name, this.RegisterArgs.NumParams, this.RegisterArgs.CommandType, this.Instance);
+            customCommandManager.Register(this.RegisterArgs.Name, this.RegisterArgs.NumParams, this.RegisterArgs.CommandType, this.Instance, this.RegisterArgs.CommandInfo);
         }
     }
 
     /// <summary>
     /// TransactionProcedureProvider registration provider
     /// </summary>
-    internal class RegisterCustomTransactionProcedureProvider : RegisterCustomTxnProvider<CustomTransactionProcedure>
+    internal sealed class RegisterCustomTransactionProcedureProvider : RegisterCustomTxnProvider<CustomTransactionProcedure>
     {
         public RegisterCustomTransactionProcedureProvider(CustomTransactionProcedure instance, RegisterTxnArgs args) : base(instance, args)
         {
@@ -201,7 +212,7 @@ namespace Garnet.server.Custom
 
         public override void Register(CustomCommandManager customCommandManager)
         {
-            customCommandManager.Register(this.RegisterArgs.Name, this.RegisterArgs.NumParams, () => this.Instance);
+            customCommandManager.Register(this.RegisterArgs.Name, this.RegisterArgs.NumParams, () => this.Instance, this.RegisterArgs.CommandInfo);
         }
     }
 }
